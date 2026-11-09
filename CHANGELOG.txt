@@ -1,0 +1,14 @@
+QD COOP 1.17.3 — 2026-11-09
+
+Fixes
+- Preserve the host's native kill experience when an enemy targets the guest proxy. The guest receives its existing single reward, not a new additional reward.
+- Defer guest world arrival/streaming updates during native teleport; retain pending host arrival across a late first-shop callback.
+- Add XP award counters and destination details to travel diagnostics.
+
+修复
+- 怪物以客机为目标时，房主不再因仇恨代理而漏掉击杀经验。客机维持原有的一次奖励。
+- 客机原版传送未结束时，不抢先改写区域加载与位置；迟到的首次商店回调不再清除房主待完成传送。
+- 增加经验结算次数与传送目的地诊断信息。
+
+Both players must update. Close the game, extract this complete package into the game directory and run Install.cmd once. Existing saves are not adjusted. Keep QDCoop-Direct/Local and Backups when updating.
+双方都需更新。关闭游戏，将完整包覆盖到游戏目录后运行一次 Install.cmd。更新时保留 QDCoop-Direct/Local 与 Backups；不会修改已有角色的历史经验。
