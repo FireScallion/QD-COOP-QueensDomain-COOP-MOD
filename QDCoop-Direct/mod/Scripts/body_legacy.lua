@@ -1,5 +1,6 @@
 return function(dir,valid,full,C,sharedWeapons)
  C=C or{}
+ local skin=dofile(dir..'skin_visual.lua')(dir,valid)
  local Q=dofile(dir..'pose_math.lua');local rig=dofile(dir..'spear_rig.lua');local motionRig=dofile(dir..'motion_rig.lua')
  local Locomotion=dofile(dir..'locomotion.lua')(Q);local weapons=sharedWeapons or dofile(dir..'weapon_visuals.lua')(dir,Q,valid,full,C)
  local committed=dofile(dir..'pose_commit.lua')();local boneNames,driverNames={},{}
@@ -27,6 +28,7 @@ return function(dir,valid,full,C,sharedWeapons)
  end
  M.reset()
  function M.releasePresentation()
+  skin.reset();M.skin=nil
   for _,key in ipairs({'driver','pose'})do local c=M[key];if valid(c)then c:SetVisibility(false,false);c:SetComponentTickEnabled(false);c:K2_DestroyComponent(M.actor)end;M[key]=nil end
   M.actor=nil;weapons.clearPresentation()
  end
@@ -37,9 +39,11 @@ return function(dir,valid,full,C,sharedWeapons)
  end
  function M.apply(actor,base,snapshot,now,downId)
   downId=downId or 0
-  if not valid(M.actor) or full(M.actor)~=full(actor)then
+  local selected=C.SkinCatalog.get(snapshot.view and snapshot.view.skin).id
+  if not valid(M.actor) or full(M.actor)~=full(actor)or M.skin~=selected then
+   M.releasePresentation()
    M.reset();M.actor=actor
-   M.pose=spawnComponent(actor,'PoseableMeshComponent');M.pose:SetSkeletalMesh(base.SkeletalMesh,true);M.pose:SetCollisionEnabled(0)
+   M.pose=spawnComponent(actor,'PoseableMeshComponent');skin.apply(M.pose,selected);M.skin=selected;M.pose:SetCollisionEnabled(0)
    M.driver=spawnComponent(actor,'SkeletalMeshComponent');M.driver:SetSkeletalMesh(LoadAsset(motionRig.mesh),true);M.driver:SetCollisionEnabled(0)
    M.driver:SetVisibility(false,false);M.driver.CastShadow=false;M.driver.VisibilityBasedAnimTickOption=0
    base:SetVisibility(false,false);base:SetComponentTickEnabled(false)

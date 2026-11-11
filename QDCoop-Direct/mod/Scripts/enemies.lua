@@ -392,7 +392,7 @@ return function(dir,C,rawValid,full,read,write,log,audio)
         audio.beginReplicaDeath(r.e);M.replay=true
         -- Bestiary and independent native loot rolls arrive through reliable
         -- reward events, including the host's actual variant/drop overrides.
-        local ok,err=pcall(function()r.e:Kill(true,true)end)
+        local ok,err=pcall(function()rewards.prepareReplicaDeath(r.e);r.e:Kill(true,true)end)
         M.replay=false;audio.endReplicaDeath();if not ok then error(err)end
        end
       end

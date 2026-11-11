@@ -13,7 +13,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
  local elevators=dofile(dir..'world_elevators.lua')(valid)
  local shrineGates=dofile(dir..'world_shrine_gates.lua')(valid)
  local gi,baseline,diskCopy,joined,pending,latest,lastRaw,applied,spawnPending
- local pickupGUIDs={};local pickupClass
+ local pickupGUIDs=dofile(dir..'personal_pickup_guids.lua');local pickupClass
  local actorRefresh,snapshotJob,snapshot
  local mapRevision=0;local disconnectAt;local pausedMovement
  local rollback
@@ -21,7 +21,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
  function M.setRollbackListener(fn)rollbackListener=fn end
  local syncCopies,asyncCopies={},{}
  local hooks={};local hooked=false;local replay=dofile(dir..'replay_scope.lua')();local changeVersion=0;local overlayFault=false;local tickCount=0;local revision=0;local travel=0;local room=0;local token='';local lastBody='';local lastPos;local lastAppliedStreams='';local actorIndex={};local stats={snapshots=0,restored=0,requests=0,accepted=0,saves=0,travels=0}
- local copyNames={};local privateFields={'ItemDrops','EnemySaveStates'}
+ local copyNames={}
  local function asset(o)return valid(o)and full(o):match(' (/Game/.*)$')or ''end
  local function guid(g)return string.format('%d,%d,%d,%d',g.A,g.B,g.C,g.D)end
  local pickupMaps={SavableActorStates=true,SavableActorItems=true}
@@ -56,8 +56,10 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   local out={};gs:GetAllActorsOfClass(gi,cls,out);local a={};for _,v in ipairs(out)do local o=v:get();if valid(o)then a[#a+1]=o end end;return a
  end
  local function resolve(path)if path==''then return nil end;local o=StaticFindObject(path);if not valid(o)then o=LoadAsset(path)end;assert(valid(o),'World asset unavailable: '..path);return o end
- local function root(o)local a={};gi.ReferencedObjects:ForEach(function(_,p)a[#a+1]=p:get()end);a[#a+1]=o;gi.ReferencedObjects=a end
- local function unroot(o)if not valid(gi)or not valid(o)then return end;local a={};gi.ReferencedObjects:ForEach(function(_,p)if full(p:get())~=full(o)then a[#a+1]=p:get()end end);gi.ReferencedObjects=a end
+ local Music=dofile(dir..'world_music.lua')(valid,asset,resolve)
+ local StoryRewards=dofile(dir..'world_story_rewards.lua')(valid,log)
+ local function root(o)local a={};gi.ReferencedObjects:ForEach(function(_,p)local v=p:get();if valid(v)then a[#a+1]=v end end);a[#a+1]=o;gi.ReferencedObjects=a end
+ local function unroot(o)if not valid(gi)or not valid(o)then return end;local a={};gi.ReferencedObjects:ForEach(function(_,p)local v=p:get();if valid(v)and full(v)~=full(o)then a[#a+1]=v end end);gi.ReferencedObjects=a end
  local function setSave(save)
   gi.ActiveSaveSlot=save
   gi.BaseActiveSave=save
@@ -69,20 +71,32 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   end
   for _,n in ipairs(copyNames)do d[n]=s[n]end;return d
  end
- local function restorePersonalWorld(s,copy)
-  assert(valid(baseline),'Missing guest save protection')
-  copyPickups(s,baseline,pickupGUIDs)
-  local personal={};s.NamedSaveData:ForEach(function(k,v)local n=k:get():ToString();if W.personalName(n)then personal[n]=v:get()end end)
-  for n in pairs(W.fields)do if not locationFields[n]then copy[n]=baseline[n]end end
-  for _,n in ipairs(privateFields)do copy[n]=baseline[n]end
-  local remove={};copy.NamedSaveData:ForEach(function(k)if W.personalName(k:get():ToString())then remove[#remove+1]=k:get():ToString()end end)
-  for _,n in ipairs(remove)do copy.NamedSaveData:Remove(FName(n))end
-  for n,v in pairs(personal)do copy.NamedSaveData:Add(FName(n),v)end
-  -- Keep the native save position, streaming and music bundle together.
- end
  clone=C.Perf.measure(clone,'world.cloneSave')
  local function personalSave(s)
-  local copy=clone(s);restorePersonalWorld(s,copy);stats.saves=stats.saves+1;return copy
+  -- Live overlays already preserve the guest's inventory, XP and pickup keys.
+  -- Persist that merged world; restoring the pre-join baseline here resurrected
+  -- the intro, barricades and bosses when this character later hosted.
+  local player=gs:GetPlayerPawn(gi,0)
+  if full(s)==full(gi.ActiveSaveSlot)then StoryRewards.ensure(gi,player)end
+  local copy=clone(s)
+  if not copy.IsSuspendSave and not spawnPending and valid(player)and not player.IsDead and not player.Teleporting and not player.QuickTeleporting and not player.DoingTeleportCrystal and not player.SafeLocationIsForcedMidair then
+   local manager=FindFirstOf('FS_LevelManager');local music=gi.MusicController
+   if valid(manager)and not manager:IsProcessingLevelChanges(gi)and valid(music)then
+    -- Primary saves spawn at SavePointID: native player loading does not read
+    -- SaveLocation. Use the game's existing resumable-save representation in
+    -- this disk copy, including the streaming/music state from the SAME safe
+    -- location. Native loading then restores the guest's feet position and
+    -- capsule height correctly when this character later hosts or plays solo.
+    copy.SaveLocation=player.LastSafeLocation
+    copy.SuspendLocation=player.LastSafeLocation
+    copy.SuspendPositionIsForcedMidair=false
+    copy.LevelLoadingSuspendState=manager:GetSafeLocationSuspendState()
+    local areas={};for _,v in ipairs(music:GetSafeLocationSuspendState())do areas[#areas+1]=v:get()end
+    copy.MusicAreaSuspendState=areas
+    copy.IsSuspendSave=true
+   end
+  end
+  stats.saves=stats.saves+1;return copy
  end
  local function indexActor(a,index)
   if not valid(a)then return end
@@ -101,6 +115,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   end
  end
  function M.background()
+  Interaction.tick()
   local started=os.clock()
   if reconcile.count>0 then reconcile.run(.0007,3)end
   if actorRefresh then for i=1,12 do local a=actorRefresh.list[actorRefresh.at];if not a then actorIndex=actorRefresh.index;actorRefresh=nil;break end;actorRefresh.at=actorRefresh.at+1;indexActor(a,actorRefresh.index);if os.clock()-started>=.001 then break end end end
@@ -156,7 +171,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
    reconcile.put('lever:'..key,function(work)replay.run(function()
     if work.wanted~=wanted then work.wanted=wanted;work.pending=nil end
     local a=live(actorIndex[key]);if valid(a)and a:IsA(StaticFindObject('/Game/LD45/Blueprints/Objects/Gate/Lever.Lever_C'))and(a.ToggledOn~=wanted or work.pending)then
-     work.pending=true;a.ToggledOn=wanted;if wanted then a['Restore to switched'](a)else a:AnimateLeverReset()end;work.pending=nil
+     work.pending=true;local before=Interaction.before(a);a.ToggledOn=wanted;if wanted then a['Restore to switched'](a)end;Interaction.after(a,before);work.pending=nil
     end
    end)end)
   end
@@ -239,7 +254,9 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   hook('/Game/Blueprints/SaveSystem/SavableActor.SavableActor_C:Save Data Index to World Save',function(ctx,index,data)
    local a=ctx:get();dirty()
    if classifyPickup(a,false)then
-    if joined and valid(baseline)and not replay.active then copyPickups(gi.ActiveSaveSlot,baseline,pickupGUIDs)end
+    if joined and valid(baseline)and not replay.active then
+     local ids={};a.GUIDs:ForEach(function(_,g)ids[guid(g:get())]=true end);copyPickups(gi.ActiveSaveSlot,baseline,ids)
+    end
     return
    end
    if not joined or C.Role~='client'or replay.active or not applied or spawnPending then return end
@@ -319,7 +336,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
    if job.gateIndex>=Gates.count then job.phase=6 end
    return false
   end
-  local body='R|'..mapRevision..'\nW|'..w..'\n'..table.concat(lines,'\n')..'\n'
+  local body='R|'..mapRevision..'\nW|'..w..'\nMU|'..Music.capture(gi)..'\n'..table.concat(lines,'\n')..'\n'
   local pos=player:K2_GetActorLocation();if lastPos and(pos.X-lastPos.X)^2+(pos.Y-lastPos.Y)^2+(pos.Z-lastPos.Z)^2>2500^2 then travel=travel+1 end;lastPos={X=pos.X,Y=pos.Y,Z=pos.Z}
   if body~=lastBody or travel~=M.lastTravel or read('out.world')==''then
    revision=revision+1;local raw=string.format('QDW1|%s|%d|%d\nP|%.3f|%.3f|%.3f|%.3f\n',token,revision,travel,pos.X,pos.Y,pos.Z,player:K2_GetActorRotation().Yaw)..body..'END\n'
@@ -337,6 +354,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   M.connected=connected;Travel.poll(connected)
   gi=FindFirstOf('FS_GameInstance_C');if not valid(gi)then return false end
   tickCount=tickCount+1
+  if (C.Role=='host'or(C.Role=='client'and joined and not spawnPending))and tickCount%10==0 then StoryRewards.ensure(gi,player)end
   if C.Role=='host'and valid(player)then
    install();if token==''then room=room+1;token=C.RunId..'_'..room end
    -- While the guest chooses/loads its character, keep the arrival position
@@ -399,6 +417,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
     end
    end
   end
+  if C.Role=='client'and joined and connected and latest and not spawnPending and not localShopTravel and tickCount%10==0 then Music.apply(gi,latest.music or latest.fields.PlayingMusicTrack)end
   if tickCount%10==0 then write('world-status.txt',string.format('role=%s joined=%s revision=%d applied=%d snapshots=%d restored=%d requests=%d accepted=%d saves=%d travels=%d pending=%s reconcile=%d reconcileFailures=%d fieldWrites=%d abandoned=%d overlayFault=%s\n',C.Role,tostring(joined==true),revision,applied and applied.revision or 0,stats.snapshots,stats.restored,stats.requests,stats.accepted,stats.saves,stats.travels,tostring(spawnPending==true),reconcile.count,reconcile.failures,stats.fieldWrites or 0,stats.abandoned or 0,tostring(overlayFault)))end
   return false
  end
@@ -416,7 +435,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
    if not((lever and source.DisableSaving)or(trigger and(not source.OnlyOnce or source.DisableSaveOnlyOnce)))then return end
    replay.run(function()
     if delta==1 then a:Activate(false,source)else a:Deactivate(false,source)end
-    if lever and not source.ToggledOn then source.ToggledOn=true;source['Restore to switched'](source)end
+    if lever and not source.ToggledOn then local before=Interaction.before(source);source.ToggledOn=true;source['Restore to switched'](source);Interaction.after(source,before)end
    end);dirty();lastBody='';stats.accepted=stats.accepted+1;return
   end
   local a=target;local p=a:K2_GetActorLocation()
@@ -444,7 +463,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   end
   end);dirty();lastBody='';stats.accepted=stats.accepted+1
  end
- function M.resetMap()Books.reset();Travel.reset();localShopTravel=false;shopRejoinPending=false;reconcile.clear();overlayFault=false;changeVersion=changeVersion+1;snapshotJob=nil;actorRefresh=nil;actorIndex={};lastAppliedStreams='';pausedMovement=nil;mapRevision=mapRevision+1;if joined then spawnPending=true end end
+ function M.resetMap()Interaction.reset();Music.reset(false);Books.reset();Travel.reset();localShopTravel=false;shopRejoinPending=false;reconcile.clear();overlayFault=false;changeVersion=changeVersion+1;snapshotJob=nil;actorRefresh=nil;actorIndex={};lastAppliedStreams='';pausedMovement=nil;mapRevision=mapRevision+1;if joined then spawnPending=true end end
  function M.checkpointReady(player)
   if overlayFault then return false end
   if C.Role=='client'and latest and(not applied or latest.session~=applied.session or latest.revision>applied.revision)then return false end
@@ -473,13 +492,13 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   return true
  end
  function M.ended()
+  Interaction.reset()
+  Music.reset(true)
   Books.reset();Travel.reset();localShopTravel=false;shopRejoinPending=false
   M.connected=false;elevators.reset();reconcile.clear();overlayFault=false;changeVersion=changeVersion+1
   snapshotJob=nil;actorRefresh=nil
   M.cancelRollback()
-  if joined and valid(gi)and valid(baseline)and valid(gi.ActiveSaveSlot)then
-   local s=gi.ActiveSaveSlot;restorePersonalWorld(s,s)
-  end
+  -- Keep the last shared world in the selected character after leaving, too.
   unroot(baseline);unroot(diskCopy);baseline=nil;diskCopy=nil;joined=false;pending=false;latest=nil;applied=nil;lastRaw=nil;spawnPending=false;token='';lastBody='';lastPos=nil;lastAppliedStreams='';actorIndex={};write('out.world','')
  end
  function M.storyChanged()dirty();lastBody='';travel=travel+1;snapshotJob=nil end

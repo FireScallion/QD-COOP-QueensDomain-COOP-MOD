@@ -1,6 +1,7 @@
 -- One native skeletal component, engine animation graph, no full-body bone copy.
 -- This pilot deliberately retains wire B poses for old peers and fallback actions.
 return function(dir,valid,full,C,weapons)
+ local skin=dofile(dir..'skin_visual.lua')(dir,valid)
  local Q=dofile(dir..'pose_math.lua');local rig=dofile(dir..'spear_rig.lua')
  local Locomotion=dofile(dir..'locomotion.lua')(Q)
  local M={ready=false,failed=false,starts=0,corrections=0,frames=0,boneWrites=0}
@@ -39,16 +40,18 @@ return function(dir,valid,full,C,weapons)
  end
  function M.eligible(snapshot)return M.eligibleView(snapshot.view)end
  function M.releasePresentation()
+  skin.reset();M.skin=nil
   if valid(M.pose)then M.pose:SetVisibility(false,false);M.pose:SetComponentTickEnabled(false);M.pose:K2_DestroyComponent(M.actor)end
   if M.actor then weapons.clearPresentation()end
   M.root=nil;M.left=nil;M.pose=nil;M.actor=nil;M.instance=nil;M.current=nil;M.serial=nil;M.lastTime=nil;M.lastActionTime=nil;M.ground=0;M.lastGround=nil;M.motion=Locomotion.new();M.turn=0;M.run=0;M.lanes={};M.wasDown=false;M.lifeStart=nil
  end
  M.releasePresentation()
  function M.apply(actor,base,snapshot,now,downId)
-  if not valid(M.actor)or full(M.actor)~=full(actor)then
+  local selected=C.SkinCatalog.get(snapshot.view and snapshot.view.skin).id
+  if not valid(M.actor)or full(M.actor)~=full(actor)or M.skin~=selected then
    M.releasePresentation();M.actor=actor
    local pose=actor:AddComponentByClass(C.ObjectRefs.find('/Script/Engine.SkeletalMeshComponent'),false,Q.transform({0,0,0},Q.axis(0,0,1,-90)),false)
-   M.pose=pose;pose:SetSkeletalMesh(base.SkeletalMesh,true);pose:SetCollisionEnabled(0);pose:SetGenerateOverlapEvents(false)
+   M.pose=pose;skin.apply(pose,selected);M.skin=selected;pose:SetCollisionEnabled(0);pose:SetGenerateOverlapEvents(false)
    pose.VisibilityBasedAnimTickOption=0;pose.bEnableUpdateRateOptimizations=false;pose:SetAnimClass(M.class);pose:SetComponentTickEnabled(true)
    M.instance=pose:GetAnimInstance();assert(valid(M.instance),'native animation instance unavailable')
    base:SetVisibility(false,false);base:SetComponentTickEnabled(false)

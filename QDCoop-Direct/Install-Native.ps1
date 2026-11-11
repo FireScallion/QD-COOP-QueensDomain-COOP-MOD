@@ -15,14 +15,46 @@ function SafeTarget($relative){
  while($cursor -and $cursor.Length -ge $root.Length){if((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw "Linked install destination: $cursor"};$cursor=Split-Path $cursor}
  return $p
 }
+function Read-InstallRows($item,[int]$depth=0){
+ if($depth -gt 32){throw 'Install record is nested too deeply.'}
+ if($item -is [array]){
+  foreach($child in $item){Read-InstallRows $child ($depth+1)}
+ }elseif($item -is [string]){
+  if($item -match '^@\{Path=(?<file>[^;]+); Backup=(?<backup>[^;]*); InstalledHash=(?<hash>[a-fA-F0-9]{64})\}$'){
+   [pscustomobject]@{Path=$Matches.file;Backup=$Matches.backup;InstalledHash=$Matches.hash}
+  }
+ }elseif($item -and $item.Path -is [string] -and $item.InstalledHash -match '^[a-fA-F0-9]{64}$'){$item}
+}
 if($Uninstall){
  if(!(Test-Path -LiteralPath $record)){throw 'No installation backup exists'}
- $rows=@(Get-Content -LiteralPath $record -Raw | ConvertFrom-Json)
- foreach($row in $rows){
-  $dest=SafeTarget $row.Path
+ $data=Get-Content -LiteralPath $record -Raw|ConvertFrom-Json
+ $rows=@(Read-InstallRows $data)
+ $mods='QueensDomain/Binaries/Win64/ue4ss/Mods'
+ $list=SafeTarget "$mods/mods.txt"
+ if(Test-Path -LiteralPath $list -PathType Leaf){
+  $reader=[IO.StreamReader]::new($list,[Text.UTF8Encoding]::new($false),$true)
+  try{$old=$reader.ReadToEnd();$encoding=$reader.CurrentEncoding}finally{$reader.Dispose()}
+  $clean=[regex]::Replace($old,'(?im)^[ \t]*QDCoop[ \t]*:[^\r\n]*(?:\r\n|\n|$)','')
+  if($old -cne $clean){[IO.File]::WriteAllText($list,$clean,$encoding)}
+ }
+ $marker=SafeTarget "$mods/QDCoop/enabled.txt"
+ if(Test-Path -LiteralPath $marker -PathType Leaf){Remove-Item -LiteralPath $marker}
+ foreach($group in ($rows|Group-Object {$_.Path.Replace('\','/')})){
+  $relative=$group.Name
+  if($relative -notmatch ('^'+[regex]::Escape("$mods/QDCoop/Scripts/")+'[a-zA-Z0-9_-][a-zA-Z0-9_.-]*$') -and
+     $relative -notmatch '^QueensDomain/Content/Paks/QDCoop-[a-zA-Z0-9_-]+\.pak$'){continue}
+  $dest=SafeTarget $relative
   if(Test-Path -LiteralPath $dest){
-   if((Get-FileHash -LiteralPath $dest).Hash -ne $row.InstalledHash){Write-Warning "Changed since installation; kept: $dest";continue}
-   if($row.Backup){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $row.Backup) -Destination $dest -Force}else{Remove-Item -LiteralPath $dest}
+   $hash=(Get-FileHash -LiteralPath $dest).Hash
+   if($hash -notin $group.Group.InstalledHash){Write-Warning "Changed since installation; kept: $dest";continue}
+   $original=$group.Group[0].Backup
+   if($original){
+    $backup=$original.Replace('\','/')
+    if($backup -notmatch '^InstallBackup/files/[a-fA-F0-9]{32}$'){throw 'Invalid install backup path'}
+    $originalFile=SafeTarget "QDCoop-Direct/$backup"
+    if((Get-FileHash -LiteralPath $originalFile).Hash -in $group.Group.InstalledHash){Remove-Item -LiteralPath $dest}
+    else{Copy-Item -LiteralPath $originalFile -Destination $dest -Force}
+   }else{Remove-Item -LiteralPath $dest}
   }
  }
  Write-Host 'QD COOP removed. Saves, other mods, and backup files were kept.';exit
@@ -32,7 +64,10 @@ if(!(Test-Path -LiteralPath (Join-Path $bin 'QueensDomain-Win64-Shipping.exe')))
 $proxy=Join-Path $bin 'dwmapi.dll';$bundled=Join-Path $PSScriptRoot 'runtime/dwmapi.dll'
 if((Test-Path -LiteralPath $proxy) -and (Get-FileHash -LiteralPath $proxy).Hash -ne (Get-FileHash -LiteralPath $bundled).Hash){throw 'An unfamiliar dwmapi.dll loader is installed. Nothing was replaced; merge loaders manually.'}
 $records=[Collections.Generic.List[object]]::new()
-if(Test-Path -LiteralPath $record){foreach($row in @(Get-Content -LiteralPath $record -Raw|ConvertFrom-Json)){$records.Add($row)}}
+if(Test-Path -LiteralPath $record){
+ $data=Get-Content -LiteralPath $record -Raw|ConvertFrom-Json
+ foreach($group in ((Read-InstallRows $data)|Group-Object {$_.Path.Replace('\','/')})){$records.Add($group.Group[0])}
+}
 $backupRoot=Join-Path $PSScriptRoot 'InstallBackup/files';[IO.Directory]::CreateDirectory($backupRoot)|Out-Null
 function Deploy($source,$relative){
  $dest=SafeTarget $relative
@@ -73,4 +108,4 @@ $text=if(Test-Path -LiteralPath $list){[IO.File]::ReadAllText($list)}else{''}
 if($text -match '(?m)^\s*QDCoop\s*:'){$text=[regex]::Replace($text,'(?m)^\s*QDCoop\s*:.*$','QDCoop : 1')}else{$text+="`r`nQDCoop : 1`r`n"}
 WriteUtf8 $temp $text;Deploy $temp 'QueensDomain/Binaries/Win64/ue4ss/Mods/mods.txt'
 WriteUtf8 $temp '';Deploy $temp 'QueensDomain/Binaries/Win64/ue4ss/Mods/QDCoop/enabled.txt'
-Write-Host 'QD COOP 1.17.3 installed. Start the ORIGINAL game launcher or Steam. Clear any old Steam QDCoopLauncher launch option. Original saves are used; a backup is made at startup.'
+Write-Host 'QD COOP 1.18.0-preview3 installed. Start the ORIGINAL game launcher or Steam. Clear any old Steam QDCoopLauncher launch option. Original saves are used; a backup is made at startup.'

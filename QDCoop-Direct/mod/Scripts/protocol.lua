@@ -2,6 +2,7 @@ local M={}
 local dir=debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])')
 local catalog=dofile(dir..'weapon_catalog.lua')
 local bodyCatalog=dofile(dir..'body_catalog.lua')
+local skins=dofile(dir..'skin_catalog.lua')
 function M.split(s)
  local out={};for field in (s..'|'):gmatch('(.-)|') do out[#out+1]=field end;return out
 end
@@ -21,7 +22,10 @@ function M.frame(s)
  local out={view={pitch=0,running=0,walkSpeed=400,weapon=0,parts={}}}
  for line in s:gmatch('[^\n]+') do
   local p=M.split(line)
-  if p[1]=='J' then
+  if p[1]=='Y' then
+   -- Unsupported cosmetic versions/IDs gracefully use Prince; gameplay stays valid.
+   if not out.skinSeen then out.skinSeen=true;out.view.skin=(#p==3 and p[2]=='1')and skins.get(p[3]).id or 'prince' end
+  elseif p[1]=='J' then
    local cap=integer(p[4],0,1);local lite=integer(p[6],0,1)
    if #p~=6 or p[2]~='1' or out.J or not M.id(p[3])or not cap or not lite or not M.id(p[5])then return nil end
    out.J={hash=p[3],cap=cap,ack=p[5],lite=lite}

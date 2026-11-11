@@ -1,8 +1,10 @@
 -- Native title entry, OptionsMenu frame and complete native save/new-game flow.
 return function(C,P,read,write,log,worldSync,L)
+ local steam=dofile(debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])')..'steam_menu.lua')(debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])'),C,read,log,L)
  local M={};local title,entry,entryLabel,panel,box,heading,frame,message,ip,port
  local divider,dividerPadding
  local phase='home';local queued;local hooks={};local optionsHook=false;local suppressClose=false
+ local joiningSteam=false
  local controls,labels={},{};local request='';local generation,started=0,0
  local joinAddress,joinPort,hostPort='127.0.0.1','47771','47771'
  local preferences=dofile(debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])')..'join_preferences.lua')
@@ -67,8 +69,11 @@ return function(C,P,read,write,log,worldSync,L)
   local f=P.frame(read('in.state'));if f then lastHostFrame,lastHostFrameAt=f,os.clock();return f end
   if lastHostFrameAt and os.clock()-lastHostFrameAt<2 then return lastHostFrame end
  end
+ local dir=debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])')
+ local skinMenu=dofile(dir..'skin_menu.lua')(C,L,C.SkinCatalog,C.SkinSelection,create,button,function(key,template,owner)return label(key,assert(findText(template.Subcontent)),owner)end,valid,log)
  local show
  local function closePanel()
+  skinMenu.close()
   if valid(panel)and panel:IsInViewport()then suppressClose=true;panel:CloseMenu();suppressClose=false end
   panel,box,heading,frame,message,ip,port,divider,dividerPadding=nil,nil,nil,nil,nil,nil,nil,nil,nil;controls={};labels={}
   if valid(entry)then controls[entry:GetFullName()]={b=entry,fn=function()show('choose')end}end
@@ -98,7 +103,7 @@ return function(C,P,read,write,log,worldSync,L)
  end
  local function joinFailed(key)
   cancelJoin();if valid(title)and title.InSaveMenu then title:CloseModal();title:BackToMainMenu()end
-  queued=nil;show('join');status(key)
+  queued=nil;show(joiningSteam and'choose'or'join');status(joiningSteam and'steam_room_error'or key)
  end
  local function readPort(widget)
   local n=tonumber(widget:GetText():ToString());if not n or n%1~=0 or n<1024 or n>65535 then status('invalid_port');return end;return n
@@ -110,10 +115,14 @@ return function(C,P,read,write,log,worldSync,L)
   local key=screen=='choose'and'multiplayer'or(screen=='host'and'host'or'join')
   heading:SetText(FText(L.get(key)));labels[#labels+1]={w=heading,key=key};local first
   if screen=='choose'then
+   first=button('host',function()show('host')end,panel.TopLevel_VideoButton,box)
+   button('join_friends',function()local r=steam.friends();status(r=='ok'and'steam_friends_hint'or(r=='overlay_disabled'and'steam_overlay_disabled'or'steam_unavailable'))end,panel.TopLevel_VideoButton,box)
+   button('join_lan',function()show('join')end,panel.TopLevel_VideoButton,box)
+   button('back',function()show('home')end,panel.TopLevel_VideoButton,box)
+  elseif screen=='host'then
    addText('host_port',30);port=field(hostPort)
    first=button('host',function()local n=readPort(port);if n then hostPort=tostring(n);C.MenuPort=n;showSaves('host')end end,panel.TopLevel_VideoButton,box)
-   button('join',function()show('join')end,panel.TopLevel_VideoButton,box)
-   button('back',function()show('home')end,panel.TopLevel_VideoButton,box)
+   button('back',function()show('choose')end,panel.TopLevel_VideoButton,box)
   else
    addText('host_address',30);ip=field(joinAddress);addText('port',30);port=field(joinPort)
    first=button('connect',function()
@@ -122,14 +131,15 @@ return function(C,P,read,write,log,worldSync,L)
     for part in addr:gmatch('[^.]+')do count=count+1;if not part:match('^%d+$')or tonumber(part)>255 then good=false end end
     if not good or count~=4 or not addr:match('^%d+%.%d+%.%d+%.%d+$')then status('invalid_ip');return end
     local n=readPort(port);if not n then return end
-    joinAddress,joinPort=addr,tostring(n);if not preferences.save(preferencesFile,joinAddress,joinPort)then log('MENU could not persist join address')end;C.Role='client';phase='waiting';started=os.time();send('client',addr,n,0);status('joining')
+    joiningSteam=false;joinAddress,joinPort=addr,tostring(n);if not preferences.save(preferencesFile,joinAddress,joinPort)then log('MENU could not persist join address')end;C.Role='client';phase='waiting';started=os.time();send('client',addr,n,0);status('joining')
    end,panel.TopLevel_VideoButton,box)
    addText('address_hint',110);button('back',function()joinAddress=ip:GetText():ToString();joinPort=port:GetText():ToString();cancelJoin();show('choose')end,panel.TopLevel_VideoButton,box)
   end
   message=label('loading',findText(panel.TopLevel_AudioButton.Subcontent));message:SetAutoWrapText(false);message.WrapTextAt=440;message:SetText(FText(''))
-  local msgSize=create('UMG.SizeBox');msgSize:SetHeightOverride(80);local msgSlot=msgSize:AddChild(message);msgSlot:SetHorizontalAlignment(2);msgSlot:SetVerticalAlignment(2);box:AddChildToVerticalBox(msgSize):SetPadding({Left=18,Top=5,Right=18,Bottom=5})
-  local height=screen=='choose'and 410 or 680
+  local msgSize=create('UMG.SizeBox');msgSize:SetHeightOverride(110);local msgSlot=msgSize:AddChild(message);msgSlot:SetHorizontalAlignment(2);msgSlot:SetVerticalAlignment(2);box:AddChildToVerticalBox(msgSize):SetPadding({Left=18,Top=5,Right=18,Bottom=5})
+  local height=(screen=='choose'or screen=='host')and 440 or 680
   frame.Slot:SetSize({X=516,Y=height});box.Slot:SetAnchors({Minimum={X=0,Y=0},Maximum={X=1,Y=1}});box.Slot:SetAlignment({X=0,Y=0});box.Slot:SetOffsets({Left=0,Top=68,Right=0,Bottom=10})
+  skinMenu.open(panel,frame,panel.TopLevel_VideoButton)
   panel.LastSelectedWidget=first;focus(first);status(nil)
  end
  local function mount(t)
@@ -156,7 +166,8 @@ return function(C,P,read,write,log,worldSync,L)
   phase='home';revision=L.revision;log('MENU mounted native title entry')
  end
  function M.tick(player)
-  L.refresh()
+  L.refresh();skinMenu.tick()
+  if not steam.disabled then local ok,err=pcall(steam.tick,player);if not ok then steam.disabled=true;log('STEAM UI disabled after error; LAN preserved: '..tostring(err))end end
   if valid(player)then
    if phase=='loading'and C.Role=='host'then send('host','127.0.0.1',C.MenuPort,C.SelectedSlot);status('opening',C.MenuPort);log('MENU host requested room on UDP '..C.MenuPort)end
    if C.Role~='menu'then phase='session'end;return C.Role=='menu'
@@ -166,6 +177,13 @@ return function(C,P,read,write,log,worldSync,L)
   if not valid(t)then return true end
   if phase=='session'then C.Role='menu';write('session.request','');write('out.state','');M.ended=true;phase='home'end
   if not same(title,t)then mount(t)end
+  local steamJoin=steam.takeJoin()
+  if steamJoin then
+   cancelJoin();if title.InSaveMenu then title:CloseModal();title:BackToMainMenu()end
+   local other=FindFirstOf('FS_GameInstance_C').CurrentOptionsMenu
+   if valid(other)and other:IsInViewport()and not same(other,panel)then other:CloseMenu()end
+   joiningSteam=true;queued=nil;show('choose');C.Role='client';phase='waiting';started=os.time();send('steam',steamJoin,0,0);status('joining')
+  end
   if queued then local fn=queued;queued=nil;if type(fn)=='string'then show(fn)else fn()end end
   if revision~=L.revision then
    revision=L.revision;if valid(entryLabel)then entryLabel:SetText(FText(L.get('multiplayer')))end
@@ -188,6 +206,8 @@ return function(C,P,read,write,log,worldSync,L)
   return true
  end
  function M.resetUI()
+  skinMenu.close()
+  steam.resetUI()
   for _,h in ipairs(hooks)do pcall(UnregisterHook,h[1],h[2],h[3])end;hooks={};optionsHook=false
   title,entry,entryLabel,panel,box,heading,frame,message,ip,port,divider,dividerPadding=nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil;controls={};labels={};queued=nil
  end

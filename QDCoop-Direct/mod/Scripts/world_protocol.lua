@@ -22,6 +22,7 @@ function M.decode(raw)
   local f=M.split(line);local tag=f[1];count=count+1;if count>20000 then return nil end
   if tag=='QDW1'then if header or #f~=4 or not f[2]:match('^[%w_%-]+$')or #f[2]>80 then return nil end;header=true;out.session=f[2];out.revision=M.integer(f[3],1,1000000000);out.travel=M.integer(f[4],0,1000000000);if not out.revision or not out.travel then return nil end
   elseif tag=='W'then if #f~=2 or out.world or not M.asset(f[2])or f[2]==''then return nil end;out.world=f[2]
+  elseif tag=='MU'then if #f~=2 or out.music~=nil or not M.asset(f[2])then return nil end;out.music=f[2]
   elseif tag=='R'then if #f~=2 or out.mapRevision then return nil end;out.mapRevision=M.integer(f[2],0,1000000000);if not out.mapRevision then return nil end
   elseif tag=='P'then if #f~=5 or out.pos then return nil end;local a={};for i=2,5 do a[i]=M.number(f[i],-10000000,10000000);if not a[i]then return nil end end;out.pos={X=a[2],Y=a[3],Z=a[4]};out.yaw=a[5]
   elseif tag=='F'then local t=M.fields[f[2]];local s=M.unescape(f[3]or'');if not t or #t~=1 or #f~=3 or s==nil or out.fields[f[2]]~=nil then return nil end;local v=value(t,s);if v==nil then return nil end;out.fields[f[2]]=v

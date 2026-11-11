@@ -1,5 +1,5 @@
 -- Pure, host-owned target selection. Damage is actual HP lost, not hit count.
-local M={window=3,hold=1.5,ratio=1.25,margin=.12,memory=1.0,combatRange=2000}
+local M={window=3,hold=1.5,ratio=1.25,margin=.12,damageRatio=1.5,memory=1.0,combatRange=2000,frontCos=.5}
 function M.range(base,engaged)return engaged and math.max(base,M.combatRange)or base end
 function M.new()return {damage={host={},client={}},seen={},target=nil,since=-1e9,switches=0}end
 function M.hit(s,id,amount,now)
@@ -31,12 +31,19 @@ function M.choose(s,candidates,now,locked,maxHP)
  end
  local current=s.target;local best=nil
  for _,id in ipairs({'host','client'})do if eligible[id]and(not best or scores[id]>scores[best])then best=id end end
+ -- A decisive contribution outranks proximity/score hysteresis, using the same
+ -- continuously decaying effective-damage window. Zero versus zero never pulls.
+ local damagePull
+ if current then
+  local other=current=='host'and'client'or'host'
+  if eligible[other]and candidates[other].los and damage[other]>0 and damage[other]>=damage[current]*M.damageRatio then damagePull=other;best=other end
+ end
  local oldValid=current and candidates[current]and candidates[current].alive and candidates[current].inRange
  -- Preserve an attack's commitment, but a continuous attack/recovery chain
  -- must not lock the first target forever.
  if locked then s.lockSince=s.lockSince or now else s.lockSince=nil end
  if current and oldValid and locked and now-s.lockSince<1.2 then best=current
- elseif current and eligible[current]and best and best~=current then
+ elseif not damagePull and current and eligible[current]and best and best~=current then
   if now-s.since<M.hold or scores[best]<=scores[current]*M.ratio+M.margin then best=current end
  end
  if best~=current then s.target=best;s.since=now;s.switches=s.switches+1 end

@@ -1,10 +1,13 @@
--- QD COOP 1.17.3: hash-only lookup, no full-table miss fallback.
+-- QD COOP 1.18.0-preview3: hash-only lookup, no full-table miss fallback.
 -- Host-owned world overlay with separate guest character persistence.
 local source=debug.getinfo(1,'S').source:gsub('^@','')
 local dir=assert(source:match('^(.*[/\\])'))
 local _ENV=dofile(dir..'fast_lookup.lua')(dir,_G)
 local C=_G.QDCoopNativeConfig or dofile(dir..'config.lua')
 local P=dofile(dir..'protocol.lua')
+C.SkinCatalog=dofile(dir..'skin_catalog.lua')
+C.SkinSelection=dofile(dir..'skin_selection.lua')(C.SkinCatalog,C.Ipc..'/../player-skin.txt')
+C.Skin=C.SkinSelection.selected
 local L=dofile(dir..'localization.lua')()
 local S=dofile(dir..'smoothing.lua')
 local smooth=S.new()
@@ -42,6 +45,7 @@ local rescue=dofile(dir..'rescue.lua')(dir,C,P,valid,full,write,log,checkpoint,w
 local items=dofile(dir..'items.lua')(dir,C,P,valid,full,write,log,checkpoint,L)
 checkpoint.setGuard(function()return not items.busy()and not rescue.busy()and not scenes.busy()end)
 local function norm(s)return (s:gsub('\\','/'):gsub('/+$',''):lower())end
+C.SteamJoinAllowed=function()return not items.busy()and not rescue.busy()and not scenes.busy()end
 local menu=C.MenuMode and dofile(dir..'menu.lua')(C,P,read,write,log,worldSync,L) or nil
 local function transform(pos) return {Rotation={X=0,Y=0,Z=0,W=1},Translation=pos,Scale3D={X=1,Y=1,Z=1}}end
 local function dist(a,b)return math.sqrt((a.X-b.X)^2+(a.Y-b.Y)^2+(a.Z-b.Z)^2)end
@@ -249,6 +253,7 @@ end
 local function captureMotion(w)
  local pos=player:K2_GetActorLocation();local yaw=player:K2_GetActorRotation().Yaw
  local lines={'QDCP1',P.row('P',w,C.Role,pos,yaw,tonumber(player.Health) or 0,attackSerial,player.Dashing and 1 or 0)}
+ lines[#lines+1]='Y|1|'..C.Skin
  if rescue.id()>0 then lines[#lines+1]='G|'..rescue.id()end
  if C.Role=='host'and C.MenuMode then lines[#lines+1]='S|'..tostring(C.SelectedSlot or 0)end
  local movement=player.CharacterMovement;if not valid(movement)then return end
@@ -467,7 +472,7 @@ _G.QDCoopEnemies=enemies.inspect
 _G.QDCoopScenes=scenes.inspect
 _G.QDCoopWorld=worldSync.inspect
 _G.QDCoopInspect=function()return {smoothingStats=smooth.stats,player=player,remote=remote,target=target,targetId=targetId,hp=targetHP,version=version,connected=connected,disabled=disabled,epoch=epoch}end
-log('QD COOP 1.17.3 loaded; role='..C.Role..' engineTickQueue='..tostring(EngineTickAvailable))
+log('QD COOP 1.18.0-preview3 loaded; role='..C.Role..' engineTickQueue='..tostring(EngineTickAvailable))
 
 
 

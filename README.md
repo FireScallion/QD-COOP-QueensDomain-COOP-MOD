@@ -2,9 +2,9 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Queen’s Domain COOP is a two-player LAN co-op mod. Explore the world, fight enemies, and challenge bosses together with a friend.
+Queen’s Domain COOP is a two-player co-op mod. Explore the world, fight enemies, and challenge bosses together with a friend. This preview adds Steam friends rooms alongside the existing LAN mode.
 
-After the one-time installation described in [INSTALL.md](INSTALL.md), launch the game normally through its original launcher or Steam. Host a session through the new in-game multiplayer menu, or join by entering the host’s IP address and port.
+After the one-time installation described in [INSTALL.md](INSTALL.md), launch the game normally through Steam. The Multiplayer menu offers **Host game**, **Join friends**, and **Join LAN game**. Steam mode requires both players to own and run the Steam version, with the in-game overlay enabled.
 
 You can play on the same local network or connect through a virtual LAN tool such as **Radmin VPN**.
 
@@ -13,20 +13,28 @@ You can play on the same local network or connect through a virtual LAN tool suc
 **Hosting adds extra world simulation, enemy AI, and synchronization overhead. We recommend that the player with the more powerful PC hosts the game.**
 
 1. **Install on both PCs.** Use matching game and mod versions. Extract the complete mod package into the game root and run `Install.cmd` once with the game closed. Then launch normally through the original launcher or Steam. Clear any Steam launch options left over from an older mod launcher. See [installation instructions](INSTALL.md) for details.
-2. **Connect to the same network.** Players on the same LAN can connect directly. If you are on different networks, both players can use Radmin VPN: one creates a network and shares its name and password with their teammate, who joins that network. Keep Radmin VPN running while playing. See the [official Radmin VPN guide](https://www.radmin-vpn.com/help/).
-3. **Host a room.** Open **Multiplayer** from the main menu, confirm the **Room port** (default: `47771`), and select **Host game**. Choose a save and enter the world. The room opens once you enter, ready for your teammate to join.
-4. **Join the host.** Open **Multiplayer → Join game**, enter the host’s IPv4 address and matching port, then select **Connect**. Once connected, choose your own character save to enter the host’s world. On a local network, use the host’s LAN IPv4 address. With Radmin VPN, use the host’s IP shown in Radmin VPN—not your own address or `127.0.0.1`.
-5. **If the connection times out.** Check that the host has entered the world, the IP and port are correct, and both players are online in Radmin VPN if using it. Check that Windows Firewall allows `QDCoopBridge.exe` to communicate on the network you are using. The default room uses UDP port `47771`; if the host changes it, use that port instead.
+2. **Host a room.** Choose **Multiplayer → Host game**, keep or change the LAN room port (default `47771`), then choose a save or create a character. The room opens after entering the world. When Steam is available, it also becomes a friends room; no IP address or virtual LAN is needed for Steam joining.
+3. **Invite a friend.** Open the pause menu and choose **Invite partner**, directly below Continue, to open Steam’s invitation overlay. Select and invite your teammate yourself.
+4. **Join through Steam.** Choose **Multiplayer → Join friends** to open Steam’s friends overlay. Right-click a friend who is hosting and choose **Join Game**, or accept their invitation. Then choose your own character save. Joining from an existing game first asks you to return to the title screen; save before accepting if you want to retain current progress. Steam’s friends overlay is the standard friends list, not a mod-filtered room browser.
+5. **Join over LAN instead.** Choose **Multiplayer → Join LAN game** and enter the host’s IPv4 address and port. Different networks can still use **Radmin VPN**. Use the host’s LAN/Radmin IP, not your own address or `127.0.0.1`. See the [Radmin VPN guide](https://www.radmin-vpn.com/help/). Windows Firewall must allow `QDCoopBridge.exe`; LAN uses UDP `47771` by default.
 
-Currently supports two players. Version 1.17.3 shares the original game saves, so keep a save backup before your first co-op session.
+Steam support is a preview pending two-account, cross-network validation. Both transport options still support **one host and one guest in total**. If Steam is unavailable, LAN remains available. Enable Steam Overlay and restart the game if the overlay buttons cannot open it.
+
+Currently supports two players. Version 1.18.0-preview3 shares the original game saves, so keep a save backup before your first co-op session.
+
+## Player appearance
+
+The Multiplayer menu includes five appearances: **Prince, Arjaot, Ippibi, Ujji, and Imba**. Use the arrows above the preview to browse, then press **Select** to equip an appearance. The button disappears for the selected model. Your selection is remembered when you reopen the menu or restart the game. Both the host and the guest can choose an appearance.
+
+The four soldier appearances reuse the existing full-body animation system: Arjaot, Ippibi, and Ujji wear helmet 00; Imba wears the closed helmet 01. This changes the third-person appearance seen by your teammate. First-person arms, character statistics, and collision remain those of the original character.
 
 ## Co-op and Progression
 
 The host’s world determines shared progression, including mechanisms, doors, destructible shortcuts, boss phases, and passages unlocked after boss fights. Special boss dialogue and cutscenes are controlled by the host, as is in-game teleportation. Book-placement puzzles are operated by the host, with the results synchronized to the joining player.
 
-The joining player keeps their own character, equipment, experience, and personal pickup progress. Items placed in the original game world can be collected independently by each player. Both players can also receive their own enemy drops according to the original game’s drop rules.
+The joining player keeps their own character, equipment, experience, and personal pickup progress. Items placed in the original game world can be collected independently by each player. Both players can also receive their own enemy drops according to the original game’s drop rules. After saving, the guest can host with that character using the saved shared world progress and their own safe position.
 
-Version 1.17.3 uses the original game save directory for both single-player and co-op. A backup is created under `QDCoop-Direct/Backups` at startup; old isolated saves are not imported automatically. When either player saves, both players save the shared world progress and their respective character states.
+Version 1.18.0-preview3 uses the original game save directory for both single-player and co-op. A backup is created under `QDCoop-Direct/Backups` at startup; old isolated saves are not imported automatically. When either player saves, both players save the shared world progress and their respective character states.
 
 ## Downed Players and Revival
 
@@ -57,8 +65,8 @@ Enemy presentation reuses the original animations and effects wherever possible,
 The host evaluates co-op enemy targets using both players’ positions, recent actual damage, and visibility.
 
 - **Distance and damage both matter.** Nearby players attract more attention, while dealing more actual HP damage raises a player’s threat score. Damage is tracked over a rolling window of roughly 3 seconds and gradually loses weight. Rapid throwing-knife hits therefore gain no extra advantage merely from hit count, and an earlier burst of damage does not lock aggro indefinitely.
-- **Sight and cover matter.** Players within an approximately 90° forward cone and a clear line of sight receive a visibility bonus. Attacking from behind can also draw attention, but does not give the enemy vision through walls. When a target briefly moves behind cover, the enemy can retain roughly 1 second of memory and pursue the last visible position.
-- **Switching targets takes a meaningful advantage.** While a target remains eligible, the enemy normally keeps it for at least about 1.5 seconds. The other player must also score clearly higher to take over. Brief target commitment during attacks and recovery helps prevent constant turning when teammates alternate hits.
+- **Sight and cover matter.** Players within an approximately 120° forward cone and a clear line of sight receive a visibility bonus. Attacking from behind can also draw attention, but does not give the enemy vision through walls. When a target briefly moves behind cover, the enemy can retain roughly 1 second of memory and pursue the last visible position. Treasure lizards retain their native fleeing behavior instead of following this chase-memory rule.
+- **Damage can decisively transfer aggro.** If the other eligible, unobstructed player has dealt at least 1.5 times the current target’s recent effective damage, they take priority. Damage continues to decay over the same 3-second window and targets are reevaluated. Otherwise, score-based switching retains its usual meaningful-advantage and roughly 1.5-second hold rules. A committed attack or recovery may briefly delay a switch, for at most about 1.2 seconds, to avoid abruptly turning mid-swing.
 - **Either player can draw aggro.** A host-side proxy represents the joining player for pursuit, hit detection, and damage, allowing enemies to actually attack them. Being downed, dying, or leaving the effective range also influences target selection. Some special attacks with targets dictated by story scripts still follow their original behavior.
 
 **World Interactions**

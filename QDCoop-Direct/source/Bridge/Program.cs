@@ -6,9 +6,11 @@ using System.Text.Json;
 
 // Prototype transport only. Unreal objects stay on the game thread in the Lua adapter.
 // Payloads are bounded data records, never executable code. One host and one guest.
+if(args.Length==2 && args[0]=="--steam-service") return SteamService.Run(args[1]);
 if(args.Length != 1) { Console.Error.WriteLine("Usage: QDCoopBridge <config.json>"); return 2; }
 var cfg=JsonSerializer.Deserialize<Config>(File.ReadAllText(args[0])) ?? throw new Exception("Missing config");
 long nextOwnerCheck=0;
+long nextSteamReleaseCheck=0;string lastSteamRelease="";
 bool OwnerAlive() {
  if(cfg.OwnerPid==0)return true; // Standalone protocol tests have no launcher.
  if(Environment.TickCount64<nextOwnerCheck)return true;
@@ -80,6 +82,7 @@ void Accept(Message m,IPEndPoint from) {
  if(peer==null||!peer.Equals(from)||peerId!=m.Id||m.Session!=session){rejected++;return;}
  lastSeen=now;
  switch(m.Kind) {
+  case "GOODBYE":Disconnect("peer left room");break;
   case "PING":Send(Make("PONG","",m.Seq),from);break;
   case "PONG":if(m.Ack==lastPingSeq)rtt=rtt*.8+Math.Min(2000,now-lastPingAt)*.2;break;
   case "ROSTER":if(cfg.Role=="client"&&m.Seq>lastRosterSeq&&m.Payload.StartsWith("QDER1|")&&m.Payload.EndsWith("\nEND\n")){lastRosterSeq=m.Seq;Atomic("in.roster",m.Payload);}break;
@@ -118,6 +121,16 @@ while(running&&OwnerAlive()) {
   }catch(Exception e) when(e is JsonException or FormatException or ArgumentException or IOException or UnauthorizedAccessException or SocketException or InvalidDataException){rejected++;}
  }
  if(peer!=null&&now-lastSeen>20000)Disconnect("timeout");
+ if(cfg.Role=="host"&&now>=nextSteamReleaseCheck){
+  nextSteamReleaseCheck=now+250;
+  try{
+   string controlPath=Path.Combine(cfg.Directory,"steam-peer-left.txt");
+   string control=File.Exists(controlPath)?File.ReadAllText(controlPath):"";
+   if(control!=lastSteamRelease){lastSteamRelease=control;var f=control.Split('|');
+    if(f.Length==3&&f[0]==session&&f[1]==peerId&&peer!=null&&IPAddress.IsLoopback(peer.Address)&&int.TryParse(f[2],out int port)&&peer.Port==port)Disconnect("Steam guest left lobby");
+   }
+  }catch(Exception e)when(e is IOException or UnauthorizedAccessException){}
+ }
  foreach(var k in enemyRx.Where(x=>now-x.Value.At>3000).Select(x=>x.Key).ToArray()){enemyRx.Remove(k);enemyDirty=true;}
  if(enemyDirty&&now-lastEnemyFlush>=50){Atomic("in.enemy",string.Join('\n',enemyRx.Values.Select(x=>x.Text))+"\n");enemyDirty=false;lastEnemyFlush=now;}
  if(cfg.Role=="client"&&peer==null&&now-lastHello>=500){Send(Make("HELLO"),host!);lastHello=now;}
@@ -172,6 +185,7 @@ while(running&&OwnerAlive()) {
  }
  wake.Wait((int)Math.Clamp(due-clock.ElapsedMilliseconds,0,250));
 }
+if(peer!=null){var goodbye=Make("GOODBYE");for(int i=0;i<3;i++)Send(goodbye,peer);}
 Atomic("status.txt","stopped||||||||\n");Log("STOP");return 0;
 
 record Config(string Role,string Directory,int Port,string Host,string Key,string Build,int OwnerPid=0,long OwnerStartTicks=0,string? IpcChannel=null);

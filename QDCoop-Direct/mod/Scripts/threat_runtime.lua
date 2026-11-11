@@ -119,7 +119,7 @@ return function(dir,C,valid,full,write,log,records,byActor,resolveSource)
    if sight.height==nil then sight.height=e:GetAggroHeight()end
    inRange=math.abs(ep.Z-ap.Z)<=sight.height
   end
-  local f=sight.forward;local dx,dy=ap.X-ep.X,ap.Y-ep.Y;local len=math.sqrt(dx*dx+dy*dy);local front=len<1 or (dx*f.X+dy*f.Y)/len>=.70710678
+   local f=sight.forward;local dx,dy=ap.X-ep.X,ap.Y-ep.Y;local len=math.sqrt(dx*dx+dy*dy);local front=len<1 or (dx*f.X+dy*f.Y)/len>=policy.frontCos
   local los=false
   if inRange then
    if not sight.viewpoint then sight.viewpoint=maths:TransformLocation(e.CapsuleComponent:K2_GetComponentToWorld(),e.LocalViewpoint.Translation)end
@@ -157,6 +157,7 @@ return function(dir,C,valid,full,write,log,records,byActor,resolveSource)
    processed=processed+1
    local e=r.e
    if valid(e)and valid(e.Data)and e.HP>0 and not e.bDead and not e.BestiaryInstance and not e.bSpawnerPreviewInstance then
+    if r.flee==nil then r.flee=e:IsA('/Game/Enemies/Lizer_00/Default_Lizer_01.Default_Lizer_01_C')and not e.DefaultEnemyMode end
     r.awarenessRange=e.Data.AwarenessProfile:GetRealMaxRangeForProfile(e.AggroRange)
     if not r.losOriginal then local l=e.EnemyLineOfSight;r.losOriginal={enabled=l.bEnabled,tick=l:IsComponentTickEnabled()};l.bEnabled=false;l:SetComponentTickEnabled(false)end
     if not r.threatInitialized and(e.bIsAttacking or e.bInRecoveryTime)then local s=state(r);s.target=T.isGuest(e.TargetPlayer)and'client'or'host';s.since=now end
@@ -164,8 +165,14 @@ return function(dir,C,valid,full,write,log,records,byActor,resolveSource)
     local s=state(r);local sight={}
     local candidates={host=candidate(e,player,'host',r,now,sight),client=T.peerAlive and candidate(e,T.proxy,'client',r,now,sight)or{alive=false}}
     r.threatCandidates=candidates
+    local previous,previousSince=s.target,s.since
     local target,changed=policy.choose(s,candidates,now,e.bIsAttacking or e.bInRecoveryTime,e.Data.HP)
-    local memory=target and not candidates[target].los and r.lastVisible and r.lastVisible[target]
+    -- A frightened treasure lizard runs AWAY from its target. Preserve its
+    -- native fear decay; a chase-memory timeout must not send it back home.
+    if r.flee and not target and e.bAggrod and previous and candidates[previous].alive then
+     s.target=previous;s.since=previousSince;target=previous;if changed then s.switches=s.switches-1 end;changed=false
+    end
+    local memory=not r.flee and target and not candidates[target].los and r.lastVisible and r.lastVisible[target]
     if memory and not valid(r.memoryActor)then
      local t=e:GetTransform();t.Translation=memory;local a=gs:BeginDeferredActorSpawnFromClass(e,C.ObjectRefs.find('/Script/Engine.SkeletalMeshActor'),t,1,nil);gs:FinishSpawningActor(a,t);a:SetActorHiddenInGame(true);a:SetActorEnableCollision(false);a:SetActorTickEnabled(false);r.memoryActor=a;local c=e:GetController();if valid(c)and e.bIsChasing then c:StopMovement()end
     elseif not memory and valid(r.memoryActor)then r.memoryActor:K2_DestroyActor();r.memoryActor=nil;local c=e:GetController();if valid(c)and e.bIsChasing then c:StopMovement()end end
@@ -174,12 +181,12 @@ return function(dir,C,valid,full,write,log,records,byActor,resolveSource)
      e.TargetPlayer=chosen
      -- Cancel the old MoveTo once; the original chase-state continuation issues
      -- its next request against GetChaseTarget, which now returns the new pawn.
-     local c=e:GetController();if valid(c)and e.bIsChasing then c:StopMovement()end
+     local c=e:GetController();if not r.flee and valid(c)and e.bIsChasing then c:StopMovement()end
      e.EnemyLineOfSight:UpdateLOSParams()
     end
     if changed then T.switches=T.switches+1;log('THREAT target '..r.id..'='..tostring(target))end
     perception(e,r)
-    if changed and not target and e.bAggrod then e:ForceUnaggro()end
+    if changed and not target and e.bAggrod and not r.flee then e:ForceUnaggro()end
     if not e.bAggrod and target and candidates[target].visible and not e.bIsAIDisabled then e.AggroBuildup=1;e:ForceAggroupdate()end
     if not e.bAggrod and not target then r.threat=nil end
    else r.threat=nil;r.threatTotals=nil;r.threatInitialized=nil;if valid(r.memoryActor)then r.memoryActor:K2_DestroyActor();r.memoryActor=nil end;if valid(e)and r.losOriginal then e.EnemyLineOfSight.bEnabled=r.losOriginal.enabled;e.EnemyLineOfSight:SetComponentTickEnabled(r.losOriginal.tick);r.losOriginal=nil end end

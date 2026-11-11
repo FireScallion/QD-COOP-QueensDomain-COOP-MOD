@@ -15,6 +15,7 @@ $bridgeOutput = Join-Path $OutputDirectory 'standalone'
 
 $modules = @(
     'Bootstrap/qdboot',
+    'Steam/qdsteam',
     'AsyncIPC/qdipc',
     'Capture/qdcapture',
     'Encounter/qdscene',

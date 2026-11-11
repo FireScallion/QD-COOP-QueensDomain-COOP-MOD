@@ -65,7 +65,9 @@ return function(dir,C,M,valid,full,write,log)
   end
   if f[5]~='D'or #f~=32 or not allowed(f[8])or #f[9]>300 or f[9]:find('[\r\n]')then return end
   local a={};for i=7,32 do if i~=8 and i~=9 and i~=27 and i~=31 then local n=tonumber(f[i]);if not n or n~=n or math.abs(n)>1e7 then return end;a[i]=n end end
-  if a[7]<0 or a[7]%1~=0 or a[16]<0 or a[16]>63 or a[16]%1~=0 or a[28]<0 or a[28]>10000 or a[28]%1~=0 or a[32]<0 or a[32]>10000 or a[32]%1~=0 then return end
+  -- Native drop tables use -1 for the pickup's default quantity (for example
+  -- Fisher_base_Data/IronFruit). Rejecting it discarded the ENTIRE two-item roll.
+  if a[7]<0 or a[7]%1~=0 or a[16]<0 or a[16]>63 or a[16]%1~=0 or a[28]<-1 or a[28]>10000 or a[28]%1~=0 or a[32]<-1 or a[32]>10000 or a[32]%1~=0 then return end
   if not allowed(f[27],true)or not allowed(f[31],true)then return end
   local d=data(f[8]);local gi=FindFirstOf('FS_GameInstance_C')
   if not valid(R.scratch)then R.scratch=StaticConstructObject(StaticFindObject('/Game/Enemies/Shared/EnemyData.EnemyData_C'),gi);resources.hold(R.scratch)end
@@ -98,6 +100,12 @@ return function(dir,C,M,valid,full,write,log)
   end
   if not R.lastRetryLog or os.clock()-R.lastRetryLog>5 then R.lastRetryLog=os.clock();log('Enemy reward waiting for resources: '..R.error)end
   return 'retry'
+ end
+ function R.prepareReplicaDeath(e)
+  -- Default_Lizer_01's DieAnim has its own delayed treasure roll, independent
+  -- of Kill(NoRewards). Keep its native fade/montage but select the ordinary
+  -- death branch; the authority's ER event owns this character's single roll.
+  if e:IsA('/Game/Enemies/Lizer_00/Default_Lizer_01.Default_Lizer_01_C')and not e.DefaultEnemyMode then e.DefaultEnemyMode=true end
  end
  function R.reset()R.applying=nil;R.scratch=nil;resources.reset();R.seen={};R.order={};R.error=nil end
  return R

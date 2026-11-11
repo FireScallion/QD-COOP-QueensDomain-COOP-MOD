@@ -12,7 +12,7 @@ The build places the bridge and native helpers under `dist/runtime/QDCoop-Direct
 
 ## Animation and other asset inputs
 
-The source archive omits cooked game-derived assets, game binaries, captured transforms, and extracted game packages. A runnable build expects four Paks in `QDCoop-Direct/assets/`.
+The source archive omits cooked game-derived assets, game binaries, captured transforms, and extracted game packages. A runnable build expects five Paks in `QDCoop-Direct/assets/`.
 
 | File | Purpose |
 | --- | --- |
@@ -20,6 +20,7 @@ The source archive omits cooked game-derived assets, game binaries, captured tra
 | `QDCoop-NativeSpear.pak` | Spear graph and animation resources |
 | `QDCoop-GuestTarget.pak` | In-game target proxy for the guest |
 | `QDCoop-PlacedItem.pak` | Placeable item actor resources |
+| `QDCoop-Skins.pak` | Two soldier meshes rebound to the existing skeleton and five menu portraits |
 
 `tools/animation/bake.cjs <input-directory> <output-directory>` processes locally prepared inputs. The input directory layout is as follows.
 
@@ -33,4 +34,6 @@ The baker writes local bone frames and a manifest with a reference-pose buffer. 
 
 The proxy and placement source under `tools/blueprints/` can serialize locally supplied UAssetAPI JSON descriptions and package the resulting asset pairs. Each serializer requires UAssetAPI 1.1.0 and the .NET 9 SDK. Each `pack.cjs` accepts the generated asset directory and the output Pak path.
 
-The repository provides the implementation and authoring code. Exact recreation of the four Paks requires the local game-specific inputs and editor templates described here. See [asset provenance](../QDCoop-Direct/THIRD-PARTY-NOTICES.txt) before redistributing generated assets.
+The repository provides the implementation and authoring code. Exact recreation of the five Paks requires the local game-specific inputs and editor templates described here. See [asset provenance](../QDCoop-Direct/THIRD-PARTY-NOTICES.txt) before redistributing generated assets.
+
+For skin binding, canonical reference transforms, and portrait authoring, see [SKINS.md](SKINS.md) and `tools/skins/`.

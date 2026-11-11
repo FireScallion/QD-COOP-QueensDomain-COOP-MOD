@@ -2,7 +2,14 @@
 return function()
  local M={language='en',revision=0};local nextRead=0
  local strings={
+  skin_prince={'王子','Prince'},skin_select={'选择','Select'},skin_previous={'‹','‹'},skin_next={'›','›'},skin_save_error={'保存失败，请重试','Could not save; try again'},
   multiplayer={'多人游戏','Multiplayer'},host={'主持游戏','Host game'},join={'加入游戏','Join game'},back={'返回','Back'},
+  join_friends={'加入好友','Join friends'},join_lan={'加入局域网游戏','Join LAN game'},invite_partner={'邀请伙伴','Invite partner'},
+  steam_friends_hint={'已打开 Steam 好友列表。右键已开房的好友，选择加入游戏。','In Steam friends, right-click a friend hosting a room and choose Join game.'},
+  steam_unavailable={'Steam 不可用。请从 Steam 启动正版游戏；局域网仍可使用。','Steam unavailable. Launch your Steam copy through Steam; LAN is still available.'},
+  steam_overlay_disabled={'请在 Steam 中启用游戏内覆盖界面，再重新启动游戏。','Enable the Steam in-game overlay, then restart the game.'},
+  steam_room_error={'无法加入 Steam 房间。请确认房间未满、房主仍在游戏中，双方使用相同版本。','Could not join the Steam room. Check that it is open, has space, and both players use the same version.'},
+  steam_leave_confirm={'返回主菜单并加入好友？未保存的进度可能丢失。','Return to the title screen and join your friend? Unsaved progress may be lost.'},
   host_port={'房间端口','Room port'},host_address={'房主 IP 地址','Host IP address'},port={'端口','Port'},
   choose_save={'选择存档','Choose save'},connect={'连接','Connect'},
   host_save={'主持游戏 — 选择存档','Host game — Choose save'},guest_save={'加入游戏 — 选择角色存档','Join game — Choose character save'},
