@@ -1,7 +1,7 @@
 -- Mirror the authority's actual boss HUD membership. Local level enemies are
 -- frozen and must not remain the health source of a cooperative boss bar.
 return function(C,state,valid,full,emit)
- local M={revision=0,received=0,updates=0};local bars={};local wanted,last,nextAt,lastSend,applying
+ local M={revision=0,received=0,updates=0};local bars={};local wanted,last,nextAt,lastSend,applying,created,nextCreate
  local base='/Game/UI/HUD/Widgets/EnemyHealthBar/BossHealthBar.BossHealthBar_C'
  local function usable(bar)return valid(bar)and full(bar):find(' /Engine/Transient.',1,true)and valid(bar.Fill)and valid(bar.DamagedSegments)end
  local function targets(bar)local t={};bar.Targets:ForEach(function(_,v)local e=v:get();if valid(e)then t[#t+1]=e end end);return t end
@@ -28,6 +28,20 @@ return function(C,state,valid,full,emit)
    end);hooks[#hooks+1]={path,a,b}
   end
  end
+ local function createBar()
+  local at=os.clock();if at<(nextCreate or 0)then return nil end;nextCreate=at+2
+  if valid(created)then return created end
+  local player=state.player;local gi=FindFirstOf('FS_GameInstance_C')
+  local pc=valid(player)and player:GetController()or nil
+  local class=LoadAsset(base)
+  local umg=StaticFindObject('/Script/UMG.Default__WidgetBlueprintLibrary')
+  if not valid(pc)or not valid(class)or not valid(umg)then return nil end
+  local ok,widget=pcall(function()return umg:Create(valid(gi)and gi or player,class,pc)end)
+  if not ok or not valid(widget)then return nil end
+  local added=pcall(function()widget:AddToViewport(0)end)
+  if not added then return nil end
+  created=widget;return widget
+ end
  function M.event(f)
   if C.Role~='client'or f[5]~='B'or #f~=9 then return false end
   local rev=tonumber(f[6]);if not rev or rev%1~=0 or rev<=M.received or rev>1e9 then return true end
@@ -39,7 +53,10 @@ return function(C,state,valid,full,emit)
  end
  function M.tick(now)
   if now<(nextAt or 0)then return end;nextAt=now+.2
-  local bar;for k,v in pairs(bars)do if usable(v)then bar=v else bars[k]=nil end end;if not bar then return end
+  local bar;for k,v in pairs(bars)do if usable(v)then bar=v else bars[k]=nil end end
+  if not bar and C.Role=='client'and wanted and wanted.active then bar=createBar();if bar then bars[full(bar)]=bar end end
+  if valid(created)and bar~=created then if usable(created)then hide(created)end;created=nil end
+  if not bar then return end
   if C.Role=='host'then
    local ids={};for _,e in ipairs(targets(bar))do local r=state.byActor[full(e)];if r then ids[#ids+1]=r.id else return end end;table.sort(ids)
    local group=valid(bar.CurrentGroup)and full(bar.CurrentGroup):match(' (/Game/[%w_/%.-]+)$')or''
