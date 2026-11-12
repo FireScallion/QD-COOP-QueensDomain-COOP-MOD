@@ -21,7 +21,7 @@ return function(dir,C,valid,full,items)
  local function location(gi)
   local index=gi:GetActiveSaveSlotIndex();assert(index>=0,'No native save slot')
   local utils=StaticFindObject('/Script/QueensDomain.BlueprintUtils'):GetCDO()
-  local slot=utils:GetSaveSlotName(index,false,false,false,0):ToString():gsub('\\','/')
+  local slot=utils:GetSaveSlotName(index,false,false,false,0,0):ToString():gsub('\\','/')
   local directory=C.ExpectedSaveDirectory:gsub('\\','/'):gsub('/+$','')..'/SaveGames/'
   local path=slot:match('^FULLPATH:(.+)$');local relative=slot
   if path then assert(path:sub(1,#directory):lower()==directory:lower(),'Rescue journal outside isolated saves');relative=path:sub(#directory+1):match('^(.+)%.sav$')end

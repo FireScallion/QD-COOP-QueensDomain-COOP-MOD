@@ -243,7 +243,7 @@ return function(C, P, write, log, valid)
   if index < 0 then return end
   if not context or context.epoch ~= epoch or context.peer ~= peer or context.index ~= index then
    local utils = StaticFindObject('/Script/QueensDomain.BlueprintUtils'):GetCDO()
-   local slot = utils:GetSaveSlotName(index, false, false, false, 0):ToString():gsub('\\', '/')
+   local slot = utils:GetSaveSlotName(index, false, false, false, 0, 0):ToString():gsub('\\', '/')
    local directory = C.ExpectedSaveDirectory:gsub('\\', '/'):gsub('/+$', '') .. '/SaveGames/'
    local primary = slot:match('^FULLPATH:(.+)$')
    local relative = slot
