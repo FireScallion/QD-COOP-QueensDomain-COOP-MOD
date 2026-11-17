@@ -41,13 +41,3 @@ The library puzzle is host-authoritative. The guest sees the host's book slots a
 The supervisor starts the existing bridge only on a validated session.request. Bridge ownership is tied to the game process and creation timestamp rather than a visible launcher. Leaving a room stops the bridge; game exit stops both supervisor and bridge. A forced supervisor exit cannot keep a bridge alive after the game dies. An installation supports one co-op game process at a time. Save persistence uses the actual original directory, retaining personal guest state and host authority; old isolated saves are not imported.
 
 1.17.2 不再使用隔离运行目录。安装时合并 Mod 启用项和必要 UE4SS 设置，备份覆盖文件；卸载只恢复或移除仍与安装结果相符的文件。其他 Mod、存档、旧版隔离目录均保留。Steam 的覆盖层、云存档和 DRM 仍需正版实测。
-
-## 1.17.3 XP ownership and native travel / 经验归属与原版传送
-
-EnemyBase grants kill experience to its current TargetPlayer. A host-side guest target deliberately overrides AddXP with an inert implementation, so switching aggro to the guest previously swallowed the host's native kill award. The host now forwards non-steal AddXP calls received by that exact proxy to its real local player. The guest's existing deduplicated ER award remains unchanged; each side still applies its own native character modifiers. XP-steal is not converted into another kill reward. Diagnostic counters distinguish guest XP awards from recovered host rewards. This does not rebalance historical saves.
-
-原版 EnemyBase 将击杀经验发给当前 TargetPlayer。怪物攻击客机时，该目标是房主侧的客机代理，其空 AddXP 实现曾吞掉房主经验。现在只将该代理收到的非吸取经验交还房主本地角色；客机原有的去重奖励保持不变，各自仍使用原版角色经验加成。不追补历史存档。
-
-World synchronization defers snapshot consumption, streaming replacement and arrival placement while the guest's native teleport flags are active. A late first-shop callback preserves an already queued host arrival instead of clearing it. Disconnect handling stays active during the wait. The original first-shop flow and local movement/interaction remain native. Arrival logs include the authority travel revision and destination, to distinguish completed world-sync placement from a later native move.
-
-客机原版传送进行中，暂缓世界快照消费、区域加载替换与位置校正，结束后使用房主最新快照。首次商店回调不会清掉已排队的房主传送；等待期间断线处理仍正常执行。原版商店演出和本地操作逻辑保留。
