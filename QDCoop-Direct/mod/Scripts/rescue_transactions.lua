@@ -13,7 +13,8 @@ return function(store,api)
  local function putIncoming(t,phase)
   store.change(function(s)s[key(t)]=value(t,phase)end)
  end
- local function send(op,t)if peer and(t.donor==peer or t.recipient==peer)then api.send(op,t)end end
+ local function known(id)return type(peer)=='table'and peer[id]==true or type(peer)=='string'and peer==id end
+ local function send(op,t)if known(t.donor)or known(t.recipient)then api.send(op,t)end end
  local function reconcile()
   local s=store.get();for code=1,6 do api.balance(code,tonumber(s['b'..code])or 0,tonumber(s['r'..code])or 0,tonumber(s['n'..code]))end
  end
@@ -78,15 +79,16 @@ return function(store,api)
   end)
   reconcile();send('C2',out);nextSend=api.now()+.8;return true
  end
- function M.event(op,t)
+ function M.event(op,t,sender)
   store.ensure()
   if not peer then return end
-  if t.donor==M.identity()and t.recipient==peer then
+  if sender and not known(sender)then return end
+  if t.donor==M.identity()and known(t.recipient)and(not sender or sender==t.recipient)then
    if op=='R2'then local out=M.active();if out and out.phase=='P'and value(out,'')==value(t,'')then api.ready(out)end
    elseif op=='D2'or op=='X2'then complete(t,op=='D2')end
    return
   end
-  if t.donor~=peer or t.recipient~=M.identity()then return end
+  if not known(t.donor)or t.recipient~=M.identity()or(sender and sender~=t.donor)then return end
   local phase=incoming(t)
   if phase=='CONFLICT'then return end
   if op=='A2'then

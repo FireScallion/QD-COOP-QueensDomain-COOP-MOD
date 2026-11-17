@@ -77,6 +77,7 @@ return function(config,valid)
  end
  function M.apply(r,f,distance,sample)
   if not M.available then return end
+  if r.ownedBody then wake(r);return end -- physics bodies require the current pose, including offscreen projectiles
   local bits=f[34]or 0
   local combat=(f.action or 0)~=0 or(f[30]or 0)>0 or bits%4>=2 or math.floor(bits/8)%2==1
   if distance<3000^2 then r.animFar=false elseif distance>3500^2 then r.animFar=true end

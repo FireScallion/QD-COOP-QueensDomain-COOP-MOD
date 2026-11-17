@@ -16,18 +16,39 @@ function SafeTarget($relative){
  return $p
 }
 if($Uninstall){
- if(!(Test-Path -LiteralPath $record)){throw 'No installation backup exists'}
- $rows=@(Get-Content -LiteralPath $record -Raw | ConvertFrom-Json)
- foreach($row in $rows){
-  $dest=SafeTarget $row.Path
+ # These are exclusively QDCoop-owned directories. Do not restore an old
+ # QDCoop version from InstallBackup, or restore a stale shared mods.txt.
+ # UE4SS and unrelated mods intentionally remain installed.
+ $owned=@('QueensDomain/Binaries/Win64/ue4ss/Mods/QDCoop')
+ $targets=@()
+ foreach($relative in $owned){
+  $dest=SafeTarget $relative
   if(Test-Path -LiteralPath $dest){
-   if((Get-FileHash -LiteralPath $dest).Hash -ne $row.InstalledHash){Write-Warning "Changed since installation; kept: $dest";continue}
-   if($row.Backup){Copy-Item -LiteralPath (Join-Path $PSScriptRoot $row.Backup) -Destination $dest -Force}else{Remove-Item -LiteralPath $dest}
+   foreach($entry in Get-ChildItem -LiteralPath $dest -Recurse -Force){
+    if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw "Linked mod content; no removal attempted: $($entry.FullName)"}
+   }
+   $targets+=$dest
   }
  }
- Write-Host 'QD COOP removed. Saves, other mods, and backup files were kept.';exit
+ $pakTargets=@('QDCoop-GuestTarget.pak','QDCoop-NativeBody.pak','QDCoop-NativeSpear.pak','QDCoop-PlacedItem.pak','QDCoop-Skins.pak') |
+  ForEach-Object {SafeTarget ('QueensDomain/Content/Paks/'+$_)}
+ $list=SafeTarget 'QueensDomain/Binaries/Win64/ue4ss/Mods/mods.txt'
+ if(Test-Path -LiteralPath $list){
+  $text=[IO.File]::ReadAllText($list)
+  WriteUtf8 $list ([regex]::Replace($text,'(?m)^\s*QDCoop\s*:[^\r\n]*(?:\r?\n|$)',''))
+ }
+ foreach($dest in $targets){Remove-Item -LiteralPath $dest -Recurse -Force}
+ foreach($dest in $pakTargets){if(Test-Path -LiteralPath $dest){Remove-Item -LiteralPath $dest -Force}}
+ if(Test-Path -LiteralPath $record){Move-Item -LiteralPath $record -Destination ($record+'.uninstalled-'+[DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff'))}
+ Write-Host 'QD COOP uninstalled from the game. Installation files in QDCoop-Direct were kept for reinstalling. UE4SS, other mods, saves and backups were kept.';exit
 }
 if(!(Test-Path -LiteralPath (Join-Path $bin 'QueensDomain-Win64-Shipping.exe'))){throw 'Extract beside the original game launcher, Engine and QueensDomain folders, then run Install.cmd.'}
+# Validate the installer payload before changing any installed files.
+foreach($relative in @('runtime/dwmapi.dll','runtime/ue4ss/UE4SS.dll','runtime/ue4ss/UE4SS-settings.ini','mod/Scripts/main.lua','standalone','assets')){
+ if(!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $relative))){throw "QD COOP installation files are incomplete ($relative). Extract the complete QD COOP ZIP into the game folder again, then run Install.cmd. Older uninstallers removed these installation files."}
+}
+# No game version/build/hash allowlist. Reflected APIs are checked when used.
+if(Test-Path -LiteralPath (Join-Path $bin 'QDCoopNativeM1.dll')){throw 'The native-DLL QDCoop branch is installed. Uninstall that branch first to avoid loading two co-op implementations.'}
 # Do not replace a running game's DLLs or someone else's proxy loader.
 $proxy=Join-Path $bin 'dwmapi.dll';$bundled=Join-Path $PSScriptRoot 'runtime/dwmapi.dll'
 if((Test-Path -LiteralPath $proxy) -and (Get-FileHash -LiteralPath $proxy).Hash -ne (Get-FileHash -LiteralPath $bundled).Hash){throw 'An unfamiliar dwmapi.dll loader is installed. Nothing was replaced; merge loaders manually.'}
@@ -73,4 +94,4 @@ $text=if(Test-Path -LiteralPath $list){[IO.File]::ReadAllText($list)}else{''}
 if($text -match '(?m)^\s*QDCoop\s*:'){$text=[regex]::Replace($text,'(?m)^\s*QDCoop\s*:.*$','QDCoop : 1')}else{$text+="`r`nQDCoop : 1`r`n"}
 WriteUtf8 $temp $text;Deploy $temp 'QueensDomain/Binaries/Win64/ue4ss/Mods/mods.txt'
 WriteUtf8 $temp '';Deploy $temp 'QueensDomain/Binaries/Win64/ue4ss/Mods/QDCoop/enabled.txt'
-Write-Host 'QD COOP 1.17.3 installed. Start the ORIGINAL game launcher or Steam. Clear any old Steam QDCoopLauncher launch option. Original saves are used; a backup is made at startup.'
+Write-Host 'QD COOP 1.2.7 installed. Start the original game launcher or Steam. Clear older QDCoop launcher options. The game uses its original saves and backs them up at startup.'

@@ -3,12 +3,16 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
  local gs=StaticFindObject('/Script/Engine.Default__GameplayStatics')
  local system=StaticFindObject('/Script/Engine.Default__KismetSystemLibrary')
  local visual=dofile(dir..'item_visuals.lua')(valid,full,gs,system)
- local M={};local ctx,peerId,identity,room,saveName
+ local M={};local ctx,peerId,identity,room,saveName,character
+ local peers=dofile(dir..'item_peers.lua')(C)
+ local custodyIdentity=dofile(dir..'item_identity.lua')(dir,C)
  local drops,escrow,receipts,winners={},{},{},{}
  local actors,byActor,claims,ui={},{},{},{}
  local serial,nextSync,nextScan=0,0,0
  local queuedPlace,queuedClaim,dirty,message
  local itemCache={}
+ local fastDrops,notices={},{};local stateSerial=0
+ local dynamicMenu=dofile(dir..'dynamic_menu.lua')
  -- Diagnostic snapshots only: native IPC retains/retries each queued write.
  -- Do not rewrite identical files every tick; gameplay journals bypass this cache.
  local diagnosticCache={}
@@ -23,8 +27,12 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
  local function save()return ctx and ctx.gi.ActiveSaveSlot end
  local function count(item)local m=save().InventoryContents;local e=m:Contains(item)and m:Find(item);return e and e:get()or 0 end
  local function mark(key,value)R.set(save(),key,value);dirty=true;nextScan=0 end
- local function send(op,value)
-  if ctx and ctx.connected and ctx.peer then write('out.events',table.concat({'IT',ctx.world,ctx.epoch,ctx.peer,op,value or '-'},'|')..'\n',true)end
+ local function send(op,value,recipient)
+  recipient=recipient or peers.host();local peer=peers.peers[recipient]
+  if ctx and ctx.connected and peer then
+   local prefix=C.RoomProtocol==2 and C.Role=='host'and('TO|'..recipient..'|')or''
+   write('out.events',prefix..table.concat({'IT',ctx.world,ctx.epoch,peer.epoch,op,value or '-'},'|')..'\n',true)
+  end
  end
  local function itemFor(path)
   if not path or not path:match('^/Game/Items/[%w_/%.-]+$')or #path>250 then return end
@@ -38,8 +46,12 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
  -- Keep resolving legacy records so their original owner can recover them.
  local function placeable(item)return item and item.Consumable and not item.Equippable and not item.Unstackable end
  local function scan()
-  drops,escrow,receipts,winners,identity,room=R.scan(save())
-  if not R.id(identity)then identity=C.RunId;mark('QDCoopPersonal~id~'..identity,1)end
+  drops,escrow,receipts,winners,character,room=R.scan(save())
+  -- A reliable host result need not wait for the sliced world snapshot.
+  -- These overrides live only in this room/map epoch; the host save remains authoritative.
+  for id,r in pairs(fastDrops)do if r.room==room then drops[id]=r end end
+  if not R.id(character)then character=C.RunId;mark('QDCoopPersonal~id~'..character,1)end
+  identity=custodyIdentity(character)
   if C.Role=='host'and not R.id(room)then room=C.RunId;mark('QDCoopRoom~'..room,1)end
  end
  local function closeUI(w)
@@ -49,7 +61,7 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
   end
  end
  local function available()
-  return ctx and ctx.connected and ctx.stable and not ctx.player.IsDead and ctx.player.Health>0 and peerId and R.id(room)
+  return ctx and ctx.connected and ctx.stable and not ctx.player.IsDead and ctx.player.Health>0 and peers.hasReady()and R.id(room)
  end
  local function custodyBusy()
   for id,r in pairs(drops)do if r.state==1 then return true end end
@@ -57,6 +69,14 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
   return queuedPlace~=nil or queuedClaim~=nil
  end
  function M.busy()return custodyBusy()end
+ local function placementFull()
+  -- Include unacknowledged local drops and in-flight awards without counting
+  -- the same durable ID twice. Independent drops do not share a settlement lock.
+  local n=0
+  for _,r in pairs(drops)do if r.state~=2 then n=n+1 end end
+  for id,r in pairs(escrow)do if r.room==room and not drops[id]then n=n+1 end end
+  return n>=64
+ end
  local function checkpointBusy()return checkpoint.busy and checkpoint.busy()end
  local function ground()
   local p=ctx.player;local pos=p:K2_GetActorLocation();local yaw=p:GetControlRotation().Yaw
@@ -79,16 +99,15 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
   end
  end
  local function register(r)
-  if drops[r.id]then return drops[r.id].raw==r.raw end
-  mark(R.prefix..r.raw,0);r.state=0;drops[r.id]=r;return true
+  if drops[r.id]then if drops[r.id].raw~=r.raw then return false end;notices[r.id]=true;return true end
+  mark(R.prefix..r.raw,0);r.state=0;drops[r.id]=r;notices[r.id]=true;return true
  end
  local function place(w,item)
-  if not available()or checkpointBusy()or custodyBusy()then report('Waiting for connection or item/save settlement');return end
+  if not available()or checkpointBusy()then report('Waiting for connection or save settlement');return end
   local path=type(item)=='string'and item or asset(item);item=itemFor(path)
   if not placeable(item)then report('Only stackable consumables can be placed');return end
   if not item or count(item)<1 then report('Item is unavailable '..path..' resolved='..tostring(valid(item))..' count='..tostring(item and count(item)));return end
-  local n=0;for _,r in pairs(drops)do if r.state==0 then n=n+1 end end
-  if n>=64 then report('Pick up an existing placed item first');return end
+  if placementFull()then report('Pick up an existing placed item first');return end
   local p,yaw=ground();if not p or not visual.template(item)then report('No safe ground or original item model');return end
   serial=serial+1
   local raw=R.encode(C.RunId..'_'..serial,identity,room,path,ctx.world,p,yaw);local r=assert(R.decode(raw))
@@ -116,7 +135,7 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
  local function grant(r)
   if receipts[r.id]then return true end
   local item=itemFor(r.item);if not item then return false end
-  if not placeable(item)and r.owner~=identity then report('Equipment transfer disabled; original owner may recover this item');return false end
+  if not placeable(item)and r.owner~=identity and r.owner~=character then report('Equipment transfer disabled; original owner may recover this item');return false end
   local before=count(item);if (item.Unstackable or item.Equippable)and before>0 then return false end
   StaticFindObject(functions):AddItemToInventory(system:Conv_ObjectToSoftObjectReference(item),1,ctx.player)
   if count(item)~=before+1 then return false end
@@ -126,42 +145,65 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
   return true
  end
  local function finish(r)
-  r.state=2;mark(R.prefix..r.raw,2)
+  r.state=2;mark(R.prefix..r.raw,2);notices[r.id]=true
  end
  local function reject(r)
   local who=winners[r.id];if who then mark('QDCoopWinner~'..r.id..'~'..who,0)end
-  winners[r.id]=nil;r.state=0;mark(R.prefix..r.raw,0)
+  winners[r.id]=nil;r.state=0;mark(R.prefix..r.raw,0);notices[r.id]=true
  end
- local function claim(id,who,position)
+ local function claim(id,who,position,recipient,legacy)
   local r=drops[id]
   if not r or r.state~=0 or not available()or checkpointBusy()or not nearby(r,position)then return end
   local item=itemFor(r.item)
-  if not item or(not placeable(item)and who~=r.owner)then report('Equipment transfer disabled; original owner may recover this item');return end
-  winners[id]=who;mark('QDCoopWinner~'..id..'~'..who,1);r.state=1;mark(R.prefix..r.raw,1)
-  if who==identity then if grant(r)then finish(r)else reject(r);report('This unique item is already owned')end
-  elseif who==peerId then send('GRANT',r.raw)end
+  if not item or(not placeable(item)and who~=r.owner and legacy~=r.owner)then report('Equipment transfer disabled; original owner may recover this item');return end
+  winners[id]=who;mark('QDCoopWinner~'..id..'~'..who,1);r.state=1;mark(R.prefix..r.raw,1);notices[id]=true
+  if recipient=='local'then if grant(r)then finish(r)else reject(r);report('This unique item is already owned')end
+  else send('GRANT',r.raw,recipient)end
  end
  function M.event(f)
-  if #f~=7 or f[2]~='IT'or not ctx or not ctx.connected or f[3]~=ctx.world or f[4]~=ctx.peer or f[5]~=ctx.epoch then return end
+  if #f~=7 or f[2]~='IT'or not ctx or not ctx.connected or f[3]~=ctx.world or f[5]~=ctx.epoch then return end
+  local peer,sender=peers.source(f)
+  if not peer then return'retry'end
+  if f[4]~=peer.epoch or(C.Role=='client'and sender~=peers.host())then return end
   local op,s=f[6],f[7]
-  if op=='HELLO'and R.id(s)then peerId=s;return end
-  if not peerId then return end
+  if op=='STATE'and C.Role=='client'then
+   local revision,state,raw=s:match('^(%d+)~([012])~(.+)$');revision=tonumber(revision)
+   local r=raw and R.decode(raw)
+   if r and r.room==room and revision and revision>0 and revision<=1e9 then
+    local old=fastDrops[r.id];if not old or revision>old.revision then
+     if old and old.raw~=r.raw then return end
+     r.state=tonumber(state);r.revision=revision;fastDrops[r.id]=r;drops[r.id]=r
+    end
+   end
+   return
+  end
+  if op=='HELLO'then
+   local id,char=s:match('^([^~]+)~([^~]+)$');id=id or s;char=char or s
+   if R.id(id)and R.id(char)then peer.identity=id;peer.character=char;peerId=id end;return
+  end
+  -- UDP delivery can precede HELLO or an in-progress checkpoint. Keep the
+  -- unapplied request in the event mailbox; transport ACK is not settlement.
+  if not peer.identity then return'retry'end
   if op=='PUT'and C.Role=='host'then
-   local r=R.decode(s);if r and r.owner==peerId and r.room==room then
+   local r=R.decode(s);if r and(r.owner==peer.identity or r.owner==peer.character)and r.room==room then
     local existing=drops[r.id]
     if placeable(itemFor(r.item))or(existing and existing.raw==r.raw)then register(r)end
    end
-  elseif op=='CLAIM'and C.Role=='host'and R.id(s)then claim(s,peerId,ctx.position)
+  elseif op=='CLAIM'and C.Role=='host'and R.id(s)then
+   local r=drops[s]
+   if r and r.state==0 and(not available()or checkpointBusy())then return'retry'end
+   claim(s,peer.identity,peer.position,sender,peer.character)
   elseif op=='GRANT'and C.Role=='client'then
    local r=R.decode(s);if not r or r.room~=room then return end
    -- The host owns the award. A late grant still settles after leaving range.
    if grant(r)then send('GOT',r.id)else send('REJECT',r.id)end
   elseif C.Role=='host'and(op=='GOT'or op=='REJECT')then
-   local r=drops[s];if r and r.state==1 and winners[s]==peerId then if op=='GOT'then finish(r)else reject(r)end end
+   local r=drops[s];if r and r.state==1 and peers.winner(winners[s],identity,character)==sender then if op=='GOT'then finish(r)else reject(r)end end
   end
  end
  local function mount(w)
   if ui[full(w)]then return end
+  dynamicMenu(w)
   local rows,labels={},{};ui[full(w)]={widget=w,rows=rows,labels=labels,languageRevision=L.revision}
   for _,pair in ipairs({{'ConsumableActions','UseButton'}})do
    local parent,original=w[pair[1]],w[pair[2]]
@@ -195,47 +237,59 @@ return function(dir,C,P,valid,full,write,log,checkpoint,L)
    M.reset(false);ctx={gi=gi,player=player,world=world,epoch=epoch};saveName=full(gi.ActiveSaveSlot);scan()
   end
   ctx.connected=connected;ctx.stable=stable;ctx.now=now;ctx.player=player
-  if not connected then peerId=nil;ctx.peer=nil end
+  if not connected then peerId=nil;ctx.peer=nil;peers.reset()else peers.refresh(frame,world,now)end
   if frame and frame.P.world==world then
    if ctx.peer~=frame.T.session then peerId=nil end
    ctx.peer=frame.T.session;ctx.position=frame.P;ctx.seen=now
-  elseif not ctx.seen or now-ctx.seen>1 then ctx.stable=false end
+  elseif C.RoomProtocol~=2 and(not ctx.seen or now-ctx.seen>1)then ctx.stable=false end
   if now>=nextScan then scan();nextScan=now+.3 end
   if queuedPlace then local q=queuedPlace;queuedPlace=nil;place(StaticFindObject(q.widget:match(' (.+)$')),q.item)end
-  if queuedClaim then local id=queuedClaim;queuedClaim=nil;if available()then if C.Role=='host'then claim(id,identity,player:K2_GetActorLocation())else send('CLAIM',id)end end end
-  if connected and ctx.peer and now>=nextSync then
-   send('HELLO',identity)
-   if peerId and room then
+  if queuedClaim then local id=queuedClaim;queuedClaim=nil;if available()then if C.Role=='host'then claim(id,identity,player:K2_GetActorLocation(),'local',character)else send('CLAIM',id)end end end
+  if connected and now>=nextSync then
+   if C.Role=='host'then for id in pairs(peers.peers)do send('HELLO',identity..'~'..character,id)end else send('HELLO',identity..'~'..character)end
+   if peers.hasReady()and room then
     for id,r in pairs(escrow)do if r.room==room then if drops[id]then if drops[id].state==2 then mark('QDCoopPersonal~place~'..r.raw,2)end elseif C.Role=='client'then send('PUT',r.raw)elseif C.Role=='host'then register(r)end end end
     if C.Role=='host'then for id,r in pairs(drops)do if r.state==1 then
-     if winners[id]==peerId then send('GRANT',r.raw)
-     elseif winners[id]==identity then if grant(r)then finish(r)else reject(r)end end
+     local recipient=peers.winner(winners[id],identity,character)
+     if recipient=='local'then if grant(r)then finish(r)else reject(r)end
+     elseif recipient then send('GRANT',r.raw,recipient)end
     end end end
    end
    nextSync=now+1
   end
   local seen={}
-  if connected then for id,r in pairs(drops)do if r.map==world and r.state==0 then
+  if connected then for id,r in pairs(drops)do if r.map==world and r.state==0 and not receipts[id]then
    seen[id]=true;if not valid(actors[id])then local item=itemFor(r.item);if item then local a=visual.create(player,r,item);if valid(a)then actors[id]=a;byActor[full(a)]=id end end end
   end end end
   for id,a in pairs(actors)do if not seen[id]and not(escrow[id]and not drops[id]and connected)then byActor[full(a)]=nil;visual.destroy(a);actors[id]=nil end end
+  local uiState='closed'
   for key,entry in pairs(ui)do
    if not valid(entry.widget)then ui[key]=nil else
     if entry.languageRevision~=L.revision then for _,l in ipairs(entry.labels)do if valid(l)then l:SetText(FText(L.get('place')))end end;entry.languageRevision=L.revision end
-    local item=entry.widget.CurrentItem;local supported=placeable(itemFor(asset(item)));local allowed=entry.widget.IsOpen and available()and not checkpointBusy()and not custodyBusy()and supported and count(item)>0
+    local item=entry.widget.CurrentItem;local supported=placeable(itemFor(asset(item)));local allowed=entry.widget.IsOpen and available()and not checkpointBusy()and not placementFull()and supported and count(item)>0
     for _,b in ipairs(entry.rows)do if valid(b)then b:SetIsEnabled(allowed==true);b:SetVisibility(connected and supported and 0 or 1)end end
+    if entry.widget.IsOpen then
+     uiState=allowed and 'ready' or not connected and 'disconnected' or not ctx.stable and 'world-loading' or checkpointBusy()and 'checkpoint-settlement' or placementFull()and 'placement-capacity' or not supported and 'unsupported-item' or count(item)<=0 and 'empty-stack' or 'player-or-peer-unavailable'
+    end
    end
   end
-  if dirty and not player.IsDead then dirty=false;gi:GI_WriteSuspendSaveImmediately(true)end
-  diagnostic('items-status.txt',string.format('identity=%s peer=%s room=%s busy=%s\n%s\n',identity or '-',peerId or '-',room or '-',tostring(custodyBusy()),message or ''))
+  if dirty and not player.IsDead then gi:GI_WriteSuspendSaveImmediately(true);dirty=false end
+  -- Publish only after the native custody save call succeeds. Gameplay grants
+  -- still use GRANT/GOT and inventory receipts, never a cosmetic prediction.
+  if C.Role=='host'and not dirty then for id in pairs(notices)do local r=drops[id]
+   if r then stateSerial=stateSerial+1;for recipient in pairs(peers.peers)do send('STATE',stateSerial..'~'..r.state..'~'..r.raw,recipient)end end
+   notices[id]=nil
+  end end
+  diagnostic('items-status.txt',string.format('identity=%s peer=%s room=%s busy=%s ui=%s\n%s\n',identity or '-',peerId or '-',room or '-',tostring(custodyBusy()),uiState,message or ''))
   local lines={};for id,r in pairs(drops)do lines[#lines+1]=id..'|'..r.state..'|'..(winners[id]or '-')..'|'..r.item..'|'..(valid(actors[id])and full(actors[id])or '-')end;table.sort(lines);diagnostic('placed-items.txt',table.concat(lines,'\n'))
  end
  function M.reset(travel)
   diagnosticCache={}
   if not travel then for _,a in pairs(actors)do visual.destroy(a)end end
-  ctx,peerId,identity,room,saveName=nil,nil,nil,nil,nil
+  ctx,peerId,identity,room,saveName,character=nil,nil,nil,nil,nil,nil;peers.reset()
   actors,byActor,claims,ui,drops,escrow,receipts,winners={},{},{},{},{},{},{},{}
   queuedPlace,queuedClaim,dirty=nil,nil,false;nextSync,nextScan=0,0
+  fastDrops,notices={},{};stateSerial=0
  end
  return M
 end

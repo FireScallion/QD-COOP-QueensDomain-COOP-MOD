@@ -34,6 +34,7 @@ function M.view(a,b,t)
  if not a or not b then if t<1 then return a else return b end end
  local v={pitch=Q.clamp(lerp(a.pitch,b.pitch,t),-45,45),running=t<1 and a.running or b.running,walkSpeed=lerp(a.walkSpeed,b.walkSpeed,t),weapon=t<1 and a.weapon or b.weapon,parts={}}
  local discrete=t<1 and a or b
+ v.skin=discrete.skin
  v.action=discrete.action;v.actionTime=discrete.actionTime;v.body=discrete.body;v.bodyTime=discrete.bodyTime
  for slot,x in pairs(discrete.parts)do
   local y=b.parts[slot];local z={mesh=x.mesh,hand=x.hand,visible=x.visible,transform=x.transform,bones=x.bones,materials=x.materials};v.parts[slot]=z

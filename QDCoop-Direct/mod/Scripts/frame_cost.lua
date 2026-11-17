@@ -1,7 +1,12 @@
 -- Bounded rolling diagnostics, asynchronously published. Durations are inclusive:
 -- parent/child rows MUST NOT be added together. QPC wall clock where available; os.clock fallback.
-return function(write)
+return function(write,enabled)
  local dir=debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])');local timer,clockError=package.loadlib(dir..'qdpose.dll','qdclock');local clock=timer or os.clock
+ if enabled==false then
+  local function noop()end
+  local function original(fn)return fn end
+  return {clock=clock,add=noop,begin=noop,finish=noop,wrap=noop,setContext=noop,measure=original,hook=original}
+ end
  local M={clock=clock,timer=timer and 'QPC'or'os.clock',clockError=clockError,callbackActive=false};local frameStart;local stats,calls,frame,spikes={},{},{},{}
  local threadIdentity=package.loadlib(dir..'qdpose.dll','qdthread')
  local threadPublished=false

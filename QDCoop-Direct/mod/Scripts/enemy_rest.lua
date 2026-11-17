@@ -11,7 +11,8 @@ return function(C,M,valid,full,gs,write,log,health)
   if R.queue then return end
   local queue={}
   local p=M.player:K2_GetActorLocation()
-  for _,v in ipairs(list)do local ok,a=pcall(function()return v:get()end);if not ok then a=v end;if valid(a)then local x=a:K2_GetActorLocation();local d=(x.X-p.X)^2+(x.Y-p.Y)^2+(x.Z-p.Z)^2;local q=M.peerPosition;if q then d=math.min(d,(x.X-q.X)^2+(x.Y-q.Y)^2+(x.Z-q.Z)^2)end;queue[#queue+1]={a=a,d=d}end end
+  local others={};if C.RoomProtocol==2 then for _,peer in pairs(C.RoomPeers or{})do local f=peer.frame;if f and f.P.world==M.world then others[#others+1]=f.P end end end
+  for _,v in ipairs(list)do local ok,a=pcall(function()return v:get()end);if not ok then a=v end;if valid(a)then local x=a:K2_GetActorLocation();local d=(x.X-p.X)^2+(x.Y-p.Y)^2+(x.Z-p.Z)^2;local q=M.peerPosition;if q then d=math.min(d,(x.X-q.X)^2+(x.Y-q.Y)^2+(x.Z-q.Z)^2)end;for _,q in ipairs(others)do d=math.min(d,(x.X-q.x)^2+(x.Y-q.y)^2+(x.Z-q.z)^2)end;queue[#queue+1]={a=a,d=d}end end
   R.queue=queue;R.index=1
   table.sort(R.queue,function(a,b)return a.d<b.d end)
   -- Old IDs remain tombstones long enough to clear transport caches. New spawns get new IDs.

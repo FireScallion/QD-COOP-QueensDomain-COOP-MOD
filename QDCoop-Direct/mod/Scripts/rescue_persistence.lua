@@ -1,4 +1,5 @@
 return function(dir,C,valid,full,items)
+ local gameAPI=dofile(dir..'game_api.lua')()
  local Store=dofile(dir..'rescue_store.lua');local M={};local bound;local serial=0
  local prefix='QDCoopPersonal~';local idPrefix=prefix..'rescueChar~';local branchPrefix=prefix..'rescueBranch~'
  local functions=StaticFindObject('/Game/Blueprints/SaveSystem/SaveFunctions.Default__SaveFunctions_C')
@@ -20,8 +21,7 @@ return function(dir,C,valid,full,items)
  end
  local function location(gi)
   local index=gi:GetActiveSaveSlotIndex();assert(index>=0,'No native save slot')
-  local utils=StaticFindObject('/Script/QueensDomain.BlueprintUtils'):GetCDO()
-  local slot=utils:GetSaveSlotName(index,false,false,false,0):ToString():gsub('\\','/')
+  local slot=gameAPI.slotName(index,false,false,false,0,0):gsub('\\','/')
   local directory=C.ExpectedSaveDirectory:gsub('\\','/'):gsub('/+$','')..'/SaveGames/'
   local path=slot:match('^FULLPATH:(.+)$');local relative=slot
   if path then assert(path:sub(1,#directory):lower()==directory:lower(),'Rescue journal outside isolated saves');relative=path:sub(#directory+1):match('^(.+)%.sav$')end

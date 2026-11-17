@@ -2,17 +2,28 @@
 -- RestoreFromSave snaps to that destination and fires arrival delegates: it is
 -- for loading a level, never for applying a live multiplayer state update.
 return function(valid)
- local M={};local busy={}
+ local M={};local busy={};local watched={};local nextPoll=0
+ local function suppress(l,on)
+  if not valid(l)then return end;local key=l:GetFullName()
+  local empty=l.LockedMessage:ToString():match('^%s*$')~=nil
+  if on or empty then
+   if not busy[key]then busy[key]={path=key:match(' (.+)$'),previous=l.DisableLockedMessage}end
+   l.DisableLockedMessage=true
+  elseif busy[key]then l.DisableLockedMessage=busy[key].previous;busy[key]=nil end
+ end
  function M.moving(a,on)
-  local function update(l)
-   if not valid(l)then return end;local key=l:GetFullName()
-   if on then if not busy[key]then busy[key]={path=key:match(' (.+)$'),previous=l.DisableLockedMessage}end;l.DisableLockedMessage=true
-   elseif busy[key]then l.DisableLockedMessage=busy[key].previous;busy[key]=nil end
-  end
+  watched[a:GetFullName()]=a
+  local function update(l)suppress(l,on)end
   update(a.OnboardLever);for _,name in ipairs({'StartLevers','EndLevers'})do a[name]:ForEach(function(_,v)update(v:get())end)end
  end
+ function M.poll()
+  local now=os.clock();if now<nextPoll then return end;nextPoll=now+.1
+  -- Native delayed BlockLockedMessage resets may occur after our start hook.
+  -- Refresh only elevators already touched, not a global actor scan.
+  for key,a in pairs(watched)do if valid(a)then M.moving(a,a.Running)else watched[key]=nil end end
+ end
  function M.reset()
-  for _,s in pairs(busy)do local l=StaticFindObject(s.path);if valid(l)then l.DisableLockedMessage=s.previous end end;busy={}
+  for _,s in pairs(busy)do local l=StaticFindObject(s.path);if valid(l)then l.DisableLockedMessage=s.previous end end;busy={};watched={};nextPoll=0
  end
  function M.is(a)return valid(a)and a:IsA('/Game/Blueprints/Elevator/Elevator_Base.Elevator_Base_C')end
  function M.near(a,p)
@@ -27,6 +38,7 @@ return function(valid)
   return index~=0 or not a.Running or (value~=0)==(not a.PlayingInReverse)
  end
  function M.restore(a,save)
+  M.moving(a,a.Running)
   local function value(i)local g=a.GUIDs[i+1];if g and save.SavableActorStates:Contains(g)then return save.SavableActorStates:Find(g):get()end end
   local unlocked=value(1);if unlocked~=nil then a.LockedBecauseNoRide=unlocked<1 end
   local goal=value(0)

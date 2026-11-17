@@ -36,7 +36,10 @@ return function(dir,C,valid,full,read,write,log,localVisualSource)
   if is(o,'/Game/Enemies/EnemyBase.EnemyBase_C')then return o end
   local a=safe(function()return o:GetOwner()end);if is(a,'/Game/Enemies/EnemyBase.EnemyBase_C')then return a end
  end
- local function send(f)if M.connected then write('out.events','SND|'..M.world..'|'..M.session..'|'..P.encode(f)..'\n',true);M.sent=M.sent+1 end end
+ local function send(f)if M.connected then
+  local origin=C.RoomProtocol==2 and f[1]=='A'and M.replayOrigin and('O|'..M.replayOrigin..'|')or''
+  write('out.events','SND|'..M.world..'|'..M.session..'|'..origin..P.encode(f)..'\n',true);M.sent=M.sent+1
+ end end
  local function stopSource(s,fade)if s and not s.ended then send({'R',s.id,now(),fade or 0});s.ended=true end end
  local function emit(r,echo,ordinal)
   M.serial=M.serial+1;r.id=M.serial;r.time=now();r.echo=echo or 0;r.ordinal=ordinal or 0
@@ -77,8 +80,8 @@ return function(dir,C,valid,full,read,write,log,localVisualSource)
    else emit(r,M.replay or 0,ord[r.asset])end
   end end
  end
- function M.beginReplay(token)M.replay=token end
- function M.endReplay()M.replay=nil end
+ function M.beginReplay(token,origin)M.replay=token;M.replayOrigin=origin end
+ function M.endReplay()M.replay=nil;M.replayOrigin=nil end
  function M.beginReplicaDeath(e)M.replicaDeath=full(e)end
  function M.endReplicaDeath()M.replicaDeath=nil end
  local function hook(path,pre,post)
@@ -178,7 +181,11 @@ return function(dir,C,valid,full,read,write,log,localVisualSource)
  function M.event(fields,world,peer)
   if fields[2]~='SND'or fields[3]~=world or fields[4]~=peer or not peer then return false end
   if M.peer~=peer then M.resetRemote();M.peer=peer end
-  local f=P.parse(table.concat(fields,'|',5));if f then M.voices:push(f)end;return true
+  local start,origin=5,nil
+  if C.RoomProtocol==2 and fields[5]=='O'then
+   origin=fields[6];if not origin or #origin~=32 or not origin:match('^%x+$')then return false end;start=7
+  end
+  local f=P.parse(table.concat(fields,'|',start));if f then f.echoOrigin=origin;M.voices:push(f)end;return true
  end
  local function attenuation(id,sound)
   M.attenCache=M.attenCache or {};local key=id..':'..sound;if valid(M.attenCache[key])then return M.attenCache[key]end
@@ -204,7 +211,8 @@ return function(dir,C,valid,full,read,write,log,localVisualSource)
      local ended=v.stop and time>=v.stop[3]
      if not v.started and time>=a[4]then
       v.started=true
-      local heard=a[13]>0 and M.heard[a[13]..':'..a[3]..':'..a[14]]
+      local ownEcho=C.RoomProtocol~=2 or(a.echoOrigin and C.Room and a.echoOrigin==C.Room.self)
+      local heard=ownEcho and a[13]>0 and M.heard[a[13]..':'..a[3]..':'..a[14]]
       if heard then M.echoes=M.echoes+1;v.skipped=true
       elseif time-a[4]>1 or ended then v.skipped=true
       else
@@ -232,5 +240,20 @@ return function(dir,C,valid,full,read,write,log,localVisualSource)
   return string.format('captured=%d sent=%d played=%d localEchoSkipped=%d nativeSuppressed=%d sources=%d voices=%d stopped=%d overflow=%d unavailable=%d duplicates=%d\nerror=%s\nunknown=%s\n',M.captured,M.sent,M.played,M.echoes,M.suppressed,sources,voices,M.stopped,M.overflows+M.voices.dropped,M.unavailable or 0,M.voices.duplicate,M.error or'',table.concat(u,';'))
  end
  M.update=scope.wrap(M.update);M.apply=scope.wrap(M.apply);M.status=scope.wrap(M.status)
+ if C.RoomProtocol==2 then
+  local contexts=dofile(dir..'remote_contexts.lua')(M,{'voices','peer'},function()return{voices=P.new()}end)
+  local event,apply,resetRemote=M.event,M.apply,M.resetRemote
+  -- The existing single-peer event reset must affect only this selected voice
+  -- context, while an explicit map/room reset tears down every context.
+  local function accept(fields,world,epoch)
+   if M.peer~=epoch then resetRemote(false);M.peer=epoch end
+   return event(fields,world,epoch)
+  end
+  function M.roomEvent(id,fields,world,epoch)return contexts.run(id,accept,fields,world,epoch)end
+  function M.roomApply(id,time,pose)return contexts.run(id,apply,time,pose)end
+  function M.removePeer(id,travel)contexts.remove(id,resetRemote,travel)end
+  function M.resetRemote(travel)contexts.reset(resetRemote,travel);resetRemote(travel)end
+  M.remoteContexts=contexts
+ end
  return M
 end

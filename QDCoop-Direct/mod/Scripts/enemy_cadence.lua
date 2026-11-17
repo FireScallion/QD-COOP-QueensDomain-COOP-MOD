@@ -5,10 +5,15 @@ function M.idle(squaredDistance)
  local d=squaredDistance or 0
  return d<2500^2 and .1 or d<3500^2 and .2 or .5
 end
-function M.distance(f,localPosition,peerPosition)
+function M.pointDistance(x,y,z,localPosition,peerPosition,peers,world)
  local function d(p)
-  return p and ((f[10]-p.X)^2+(f[11]-p.Y)^2+(f[12]-p.Z)^2)or 1e20
+  return p and ((x-p.X)^2+(y-p.Y)^2+(z-p.Z)^2)or 1e20
  end
- return math.min(d(localPosition),d(peerPosition))
+ local nearest=math.min(d(localPosition),d(peerPosition))
+ if peers then for _,peer in pairs(peers)do if peer.world==world then nearest=math.min(nearest,d(peer.pose))end end end
+ return nearest
+end
+function M.distance(f,localPosition,peerPosition,peers,world)
+ return M.pointDistance(f[10],f[11],f[12],localPosition,peerPosition,peers,world)
 end
 return M

@@ -205,7 +205,14 @@ return function(dir,C,valid,full,read,write,log)
     local s=M.sources[full(ctx:get())];if not s then return end
     if stopping then s.deactivated=true end
     local now=M.gs:GetRealTimeSeconds(M.player);local v=capture(s,now)
-    if v then s.latest=v;s.captureAt=now+1/30;birth(v);if not s.born then s.born=true;M.births=M.births+1 end end
+    if v then
+     local changed=not s.born or not s.latest or s.latest.active~=v.active
+     s.latest=v;s.captureAt=now+1/30
+     -- Native visibility setters may run every frame with the same value.
+     -- Only transitions need an immediate event; normal frames still carry motion/parameters.
+     if changed then birth(v)end
+     if not s.born then s.born=true;M.births=M.births+1 end
+    end
    end)
   end
   for _,spec in ipairs({{'Float','f'},{'Bool','b'},{'Int','i'},{'Vec3','v'},{'LinearColor','c'}})do
@@ -313,7 +320,7 @@ return function(dir,C,valid,full,read,write,log)
    M.deferred=M.deferred+#frame-n
    lines[#lines+1]='END';write('out.visual',table.concat(lines,'\n')..'\n')
   end
-  local raw=read('in.visual');if raw~=M.lastRaw and raw~=''then local f=E.frame(raw);if f and f.world==world then M.timeline:push(f);M.received=M.received+1;M.lastRaw=raw end end
+  if C.RoomProtocol~=2 then local raw=read('in.visual');if raw~=M.lastRaw and raw~=''then local f=E.frame(raw);if f and f.world==world then M.timeline:push(f);M.received=M.received+1;M.lastRaw=raw end end end
  end
  function M.event(fields,world,peerSession)
   if fields[2]~='VFX'or fields[3]~=world or fields[4]~=peerSession then return false end
@@ -507,6 +514,29 @@ return function(dir,C,valid,full,read,write,log)
  M.isLocalSource=scope.wrap(function(o)return not enemyOf(o)and owned(o)end)
  local originalStatus=M.status;function M.status()return originalStatus()..Validation.status():gsub('presentWeak','fxWeak')..'\n'end
  M.update=scope.wrap(M.update,Validation);M.apply=scope.wrap(M.apply,Validation);M.status=scope.wrap(M.status)
+ if C.RoomProtocol==2 then
+  local contexts=dofile(dir..'remote_contexts.lua')(M,{'timeline','ghosts','borrowed','body','retryAt','lastRaw','remoteEpoch'},function()return{timeline=Timeline.new(),ghosts={},borrowed={}}end)
+  local event,apply,resetRemote=M.event,M.apply,M.resetRemote
+  function M.roomEvent(id,fields,world,epoch)
+   return contexts.run(id,function()
+    if M.remoteEpoch~=epoch then resetRemote(false);M.remoteEpoch=epoch end
+    return event(fields,world,epoch)
+   end)
+  end
+  function M.roomFrame(id,raw,world,epoch)
+   return contexts.run(id,function()
+    if M.remoteEpoch~=epoch then resetRemote(false);M.remoteEpoch=epoch end
+    if M.lastRaw==raw then return end
+    local f=E.frame(raw);if f and f.world==world and f.session==epoch then M.timeline:push(f);M.lastRaw=raw;M.received=M.received+1 end
+   end)
+  end
+  function M.roomApply(id,time,body,enemyTime)
+   return contexts.run(id,function()M.body=body;return apply(time,body and body.pose,enemyTime)end)
+  end
+  function M.removePeer(id,travel)contexts.remove(id,resetRemote,travel)end
+  function M.resetRemote(travel)contexts.reset(resetRemote,travel);resetRemote(travel)end
+  M.remoteContexts=contexts
+ end
  return M
 end
 

@@ -7,7 +7,12 @@ function P.parse(s)
  local life
  if #f>=7 and f[#f-6]==-901 then
   life={};for i=1,6 do local v=f[#f-6+i];if v%1~=0 then return end;life[i]=v end
-  if life[1]<1 or life[1]>5 or life[2]<0 or life[2]>7 or life[6]<0 or life[6]>3 then return end
+  if life[1]<1 or life[1]>8 or life[2]<0 or life[2]>7 or life[6]<0 or life[6]>3 then return end
+  for i=1,7 do f[#f]=nil end
+ end
+ local fog
+ if f[#f-6]==-902 then
+  fog={};for i=1,6 do fog[i]=f[#f-6+i]end
   for i=1,7 do f[#f]=nil end
  end
  local n=24+f[24]*10
@@ -29,7 +34,7 @@ function P.parse(s)
  if #f>=n+4 then for i=n+1,n+3 do if math.abs(f[i])>20000 then return end end;if f[n+4]<0 or f[n+4]>3 or f[n+4]%1~=0 then return end end
  for _,base in ipairs({13})do local q=0;for i=base+4,base+7 do q=q+f[i]^2 end;if q<.8 or q>1.2 then return end end
  for bone=0,f[24]-1 do local base=24+bone*10;local q=0;for j=4,7 do q=q+f[base+j]^2 end;if q<.8 or q>1.2 then return end end
- f.life=life;return f
+ f.life=life;f.fog=fog;return f
 end
-function P.encode(f)local a={};for i,v in ipairs(f)do a[i]=type(v)=='number'and string.format((i==4 or i==6 or i==7 or i==9 or i==24)and '%d'or(i==32 and f[24]==0 and '%.6f'or '%.3f'),v)or v end;return table.concat(a,'|')end
+function P.encode(f)local a={};local fogAt=f[#f-6]==-902 and #f-5 or(f[#f-13]==-902 and #f-12 or math.huge);for i,v in ipairs(f)do a[i]=type(v)=='number'and string.format((i==4 or i==6 or i==7 or i==9 or i==24)and '%d'or((i>=fogAt and i<fogAt+4 or i==32 and f[24]==0)and '%.6f'or '%.3f'),v)or v end;return table.concat(a,'|')end
 return P

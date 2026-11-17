@@ -1,6 +1,7 @@
 -- One native skeletal component, engine animation graph, no full-body bone copy.
 -- This pilot deliberately retains wire B poses for old peers and fallback actions.
 return function(dir,valid,full,C,weapons)
+ local skin=dofile(dir..'skin_visual.lua')(dir,valid)
  local Q=dofile(dir..'pose_math.lua');local rig=dofile(dir..'spear_rig.lua')
  local Locomotion=dofile(dir..'locomotion.lua')(Q)
  local M={ready=false,failed=false,starts=0,corrections=0,frames=0,boneWrites=0}
@@ -10,6 +11,12 @@ return function(dir,valid,full,C,weapons)
  local ref,head={},nil;local pos,rot={},{}
  for i,b in ipairs(rig.target)do rot[i]=b.parent>0 and Q.mul(rot[b.parent],b.q)or b.q;pos[i]=b.parent>0 and Q.add(pos[b.parent],Q.rot(rot[b.parent],b.p))or b.p;ref[b.name]=pos[i];if b.name=='head_x'then head=b.cq end end
  local footNames={'foot_l','foot_r','toes_01_l','toes_01_r'};local names={};for _,n in ipairs(footNames)do names[n]=FName(n)end;names.hand_l=FName('hand_l');names.hand_r=FName('hand_r')
+ function M.shareResources(source)
+  -- Assets are retained by the same GameInstance. Each peer still owns its
+  -- animation instance, montage state, skin, weapon parts and interpolation.
+  if not source or not source.ready or source.failed or source.catalog.hash~=cat.hash or not valid(source.class)then return false end
+  cat=source.catalog;clips=cat.clips;M.catalog=cat;M.class=source.class;M.ready=true;return true
+ end
  function M.preload(gi)
   if C.NativeSpear==false or M.ready or M.failed or not valid(gi)then return end
   local ok,err=pcall(function()
@@ -21,7 +28,8 @@ return function(dir,valid,full,C,weapons)
    end
    -- Bounded warm-up before connection: never load the entire catalog in a frame.
    for i=cursor,math.min(cursor+7,#clips)do
-    local c=clips[i];local p='/Game/QDCoopBody/Animations/'..c.name..'.'..c.name
+    local c=clips[i];local sequenceName=c.sequenceName or c.name
+    local p='/Game/QDCoopBody/Animations/'..sequenceName..'.'..sequenceName
     c.sequence=load(ks,p);assert(valid(c.sequence),'native sequence missing '..c.name);retained[#retained+1]=c.sequence
     if c.montage then c.asset=load(ks,'/Game/QDCoopBody/Montages/'..c.name..'.'..c.name);assert(valid(c.asset));retained[#retained+1]=c.asset end
     cursor=i+1
@@ -39,16 +47,18 @@ return function(dir,valid,full,C,weapons)
  end
  function M.eligible(snapshot)return M.eligibleView(snapshot.view)end
  function M.releasePresentation()
+  skin.reset();M.skin=nil
   if valid(M.pose)then M.pose:SetVisibility(false,false);M.pose:SetComponentTickEnabled(false);M.pose:K2_DestroyComponent(M.actor)end
   if M.actor then weapons.clearPresentation()end
   M.root=nil;M.left=nil;M.pose=nil;M.actor=nil;M.instance=nil;M.current=nil;M.serial=nil;M.lastTime=nil;M.lastActionTime=nil;M.ground=0;M.lastGround=nil;M.motion=Locomotion.new();M.turn=0;M.run=0;M.lanes={};M.wasDown=false;M.lifeStart=nil
  end
  M.releasePresentation()
  function M.apply(actor,base,snapshot,now,downId)
-  if not valid(M.actor)or full(M.actor)~=full(actor)then
+  local selected=C.SkinCatalog.get(snapshot.view and snapshot.view.skin).id
+  if not valid(M.actor)or full(M.actor)~=full(actor)or M.skin~=selected then
    M.releasePresentation();M.actor=actor
    local pose=actor:AddComponentByClass(C.ObjectRefs.find('/Script/Engine.SkeletalMeshComponent'),false,Q.transform({0,0,0},Q.axis(0,0,1,-90)),false)
-   M.pose=pose;pose:SetSkeletalMesh(base.SkeletalMesh,true);pose:SetCollisionEnabled(0);pose:SetGenerateOverlapEvents(false)
+   M.pose=pose;skin.apply(pose,selected);M.skin=selected;pose:SetCollisionEnabled(0);pose:SetGenerateOverlapEvents(false)
    pose.VisibilityBasedAnimTickOption=0;pose.bEnableUpdateRateOptimizations=false;pose:SetAnimClass(M.class);pose:SetComponentTickEnabled(true)
    M.instance=pose:GetAnimInstance();assert(valid(M.instance),'native animation instance unavailable')
    base:SetVisibility(false,false);base:SetComponentTickEnabled(false)

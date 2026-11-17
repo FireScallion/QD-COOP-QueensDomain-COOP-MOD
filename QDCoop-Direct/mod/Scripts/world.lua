@@ -1,30 +1,50 @@
 return function(dir,C,valid,full,read,write,log,checkpoint)
  local W=dofile(dir..'world_protocol.lua');local M={};local gs=StaticFindObject('/Script/Engine.Default__GameplayStatics')
+ local streamRejoinDistance=5000
  local Gates=dofile(dir..'encounter_gates.lua').runtime(valid,full,StaticFindObject,gs,W)
+ local Arena=dofile(dir..'arena_environment.lua').runtime(dir,valid,gs)
+ local arenaFaults={}
+ local function arenaCall(stage,fn,...)
+  local ok,err=pcall(fn,...)
+  if ok then arenaFaults[stage]=nil
+  elseif arenaFaults[stage]~=tostring(err)then
+   arenaFaults[stage]=tostring(err)
+   log('WORLD arena '..stage..' failed: '..tostring(err))
+  end
+ end
  local Travel=dofile(dir..'world_travel_policy.lua')(dir,C,valid)
  local Books=dofile(dir..'world_library_books.lua')(valid,full)
+ local CampaignTriggers=dofile(dir..'world_campaign_triggers.lua')(valid,full)
+ local Campaign=dofile(dir..'world_campaign_recovery.lua')(valid,full,log,CampaignTriggers)
+ local Offerings=dofile(dir..'world_aqua_offerings.lua')(valid,full,log)
+ local Beacons=dofile(dir..'world_library_beacons.lua')(valid,full,log)
+ local Necro=dofile(dir..'world_necro_walls.lua')(valid,full,log)
+ local CollectRewards=dofile(dir..'world_collect_rewards.lua')(dir,valid,W,log)
  local localShopTravel=false;local shopRejoinPending=false
+ local nativeTeleportPending=false;local teleportArrival=false
  local locationFields={SavedArea=true,PlayingMusicTrack=true,SaveLevel=true,SavePointID=true,LastTouchedCheckpoint=true}
  local Delta=dofile(dir..'world_delta.lua')
- local Interaction=dofile(dir..'world_interaction_presentation.lua')(valid,gs)
+ local Interaction=dofile(dir..'world_interaction_presentation.lua')(valid,gs,dofile(dir..'pose_math.lua'))
  local reconcile=dofile(dir..'reconcile_queue.lua')(os.clock,function(key,err,count)
   write('world-reconcile-error.txt',key..' failures='..count..' '..tostring(err)..'\n');log('WORLD pending '..key..' '..tostring(err))
  end)
  local elevators=dofile(dir..'world_elevators.lua')(valid)
  local shrineGates=dofile(dir..'world_shrine_gates.lua')(valid)
  local gi,baseline,diskCopy,joined,pending,latest,lastRaw,applied,spawnPending
- local pickupGUIDs={};local pickupClass
+ local pickupGUIDs=dofile(dir..'personal_pickup_guids.lua');local pickupClass
  local actorRefresh,snapshotJob,snapshot
+ local doorTransitions={}
  local mapRevision=0;local disconnectAt;local pausedMovement
  local rollback
  local rollbackListener=function()end
  function M.setRollbackListener(fn)rollbackListener=fn end
  local syncCopies,asyncCopies={},{}
  local hooks={};local hooked=false;local replay=dofile(dir..'replay_scope.lua')();local changeVersion=0;local overlayFault=false;local tickCount=0;local revision=0;local travel=0;local room=0;local token='';local lastBody='';local lastPos;local lastAppliedStreams='';local actorIndex={};local stats={snapshots=0,restored=0,requests=0,accepted=0,saves=0,travels=0}
- local copyNames={};local privateFields={'ItemDrops','EnemySaveStates'}
+ local copyNames={}
  local function asset(o)return valid(o)and full(o):match(' (/Game/.*)$')or ''end
  local function guid(g)return string.format('%d,%d,%d,%d',g.A,g.B,g.C,g.D)end
  local pickupMaps={SavableActorStates=true,SavableActorItems=true}
+ local function personalGuid(key)return pickupGUIDs[key]or CollectRewards.personalGuid(key)end
  local function isPickup(a)
   if not valid(a)then return false end
   if not valid(pickupClass)then pickupClass=StaticFindObject('/Game/Blueprints/CoreItemPickupActor.CoreItemPickupActor_C')end
@@ -44,20 +64,29 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
  RegisterBeginPlayPreHook(function(ctx)
   if C.Role~='host'and C.Role~='client'then return end
   local a=ctx:get()
-  if joined and C.Role=='client'then Books.lock(a)end
+  if joined and C.Role=='client'then Books.lock(a);arenaCall('guest setup',Arena.guestActor,a)end
   local ok,err=pcall(classifyPickup,a,true)
   if not ok then write('error.txt','Personal pickup initialization: '..tostring(err))end
+  local ghostId=CollectRewards.discoverGhost(a)
+  if ghostId and joined and valid(baseline)and valid(gi)and valid(gi.ActiveSaveSlot)then
+   copyPickups(baseline,gi.ActiveSaveSlot,{[ghostId]=true})
+  end
  end)
  RegisterBeginPlayPostHook(function(ctx)
-  if joined and C.Role=='client'then Books.lock(ctx:get())end
+  if joined and C.Role=='client'then local actor=ctx:get();Books.lock(actor);CollectRewards.onActor(actor)end
  end)
  local function actors(path)
   local cls=StaticFindObject(path);if not valid(cls)then return{}end
   local out={};gs:GetAllActorsOfClass(gi,cls,out);local a={};for _,v in ipairs(out)do local o=v:get();if valid(o)then a[#a+1]=o end end;return a
  end
  local function resolve(path)if path==''then return nil end;local o=StaticFindObject(path);if not valid(o)then o=LoadAsset(path)end;assert(valid(o),'World asset unavailable: '..path);return o end
- local function root(o)local a={};gi.ReferencedObjects:ForEach(function(_,p)a[#a+1]=p:get()end);a[#a+1]=o;gi.ReferencedObjects=a end
- local function unroot(o)if not valid(gi)or not valid(o)then return end;local a={};gi.ReferencedObjects:ForEach(function(_,p)if full(p:get())~=full(o)then a[#a+1]=p:get()end end);gi.ReferencedObjects=a end
+ local Music=dofile(dir..'world_music.lua')(valid,asset,resolve)
+ local StoryRewards=dofile(dir..'world_story_rewards.lua')(valid,log)
+ local BossRewards=dofile(dir..'world_boss_rewards.lua')(valid,log)
+ local GiantSerf=dofile(dir..'world_giant_serf.lua')(valid,log,gs)
+ local ensureRaiderRewards=dofile(dir..'world_raider_rewards.lua')(valid,log,W)
+ local function root(o)local a={};gi.ReferencedObjects:ForEach(function(_,p)local v=p:get();if valid(v)then a[#a+1]=v end end);a[#a+1]=o;gi.ReferencedObjects=a end
+ local function unroot(o)if not valid(gi)or not valid(o)then return end;local a={};gi.ReferencedObjects:ForEach(function(_,p)local v=p:get();if valid(v)and full(v)~=full(o)then a[#a+1]=v end end);gi.ReferencedObjects=a end
  local function setSave(save)
   gi.ActiveSaveSlot=save
   gi.BaseActiveSave=save
@@ -69,20 +98,32 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   end
   for _,n in ipairs(copyNames)do d[n]=s[n]end;return d
  end
- local function restorePersonalWorld(s,copy)
-  assert(valid(baseline),'Missing guest save protection')
-  copyPickups(s,baseline,pickupGUIDs)
-  local personal={};s.NamedSaveData:ForEach(function(k,v)local n=k:get():ToString();if W.personalName(n)then personal[n]=v:get()end end)
-  for n in pairs(W.fields)do if not locationFields[n]then copy[n]=baseline[n]end end
-  for _,n in ipairs(privateFields)do copy[n]=baseline[n]end
-  local remove={};copy.NamedSaveData:ForEach(function(k)if W.personalName(k:get():ToString())then remove[#remove+1]=k:get():ToString()end end)
-  for _,n in ipairs(remove)do copy.NamedSaveData:Remove(FName(n))end
-  for n,v in pairs(personal)do copy.NamedSaveData:Add(FName(n),v)end
-  -- Keep the native save position, streaming and music bundle together.
- end
  clone=C.Perf.measure(clone,'world.cloneSave')
  local function personalSave(s)
-  local copy=clone(s);restorePersonalWorld(s,copy);stats.saves=stats.saves+1;return copy
+  -- Live overlays already preserve the guest's inventory, XP and pickup keys.
+  -- Persist that merged world; restoring the pre-join baseline here resurrected
+  -- the intro, barricades and bosses when this character later hosted.
+  local player=gs:GetPlayerPawn(gi,0)
+  if full(s)==full(gi.ActiveSaveSlot)then StoryRewards.ensure(gi,player);BossRewards.ensure(gi,player,C.Role=='client')end
+  local copy=clone(s)
+  if not copy.IsSuspendSave and not spawnPending and valid(player)and not player.IsDead and not player.Teleporting and not player.QuickTeleporting and not player.DoingTeleportCrystal and not player.SafeLocationIsForcedMidair then
+   local manager=FindFirstOf('FS_LevelManager');local music=gi.MusicController
+   if valid(manager)and not manager:IsProcessingLevelChanges(gi)and valid(music)then
+    -- Primary saves spawn at SavePointID: native player loading does not read
+    -- SaveLocation. Use the game's existing resumable-save representation in
+    -- this disk copy, including the streaming/music state from the SAME safe
+    -- location. Native loading then restores the guest's feet position and
+    -- capsule height correctly when this character later hosts or plays solo.
+    copy.SaveLocation=player.LastSafeLocation
+    copy.SuspendLocation=player.LastSafeLocation
+    copy.SuspendPositionIsForcedMidair=false
+    copy.LevelLoadingSuspendState=manager:GetSafeLocationSuspendState()
+    local areas={};for _,v in ipairs(music:GetSafeLocationSuspendState())do areas[#areas+1]=v:get()end
+    copy.MusicAreaSuspendState=areas
+    copy.IsSuspendSave=true
+   end
+  end
+  stats.saves=stats.saves+1;return copy
  end
  local function indexActor(a,index)
   if not valid(a)then return end
@@ -90,6 +131,13 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   if not name:find('Default__',1,true)then
    if joined and C.Role=='client'then Books.lock(a,name)end
    classifyPickup(a,false);local path=name:match(' (.+)$')
+   if C.Role=='host'and Necro.manager(a)then
+    reconcile.put('necro:'..path,function()
+     if C.Role~='host'or not valid(gi)or not valid(gi.ActiveSaveSlot)then return end
+     local manager=StaticFindObject(path)
+     if replay.run(function()return Necro.repair(manager,gi.ActiveSaveSlot)end)then changeVersion=changeVersion+1;lastBody=''end
+    end)
+   end
    a.GUIDs:ForEach(function(i,g)index[guid(g:get())]={path=path,index=i-1}end)
   end
  end
@@ -101,6 +149,9 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   end
  end
  function M.background()
+  Interaction.tick()
+  if C.Role=='client'and joined then arenaCall('presentation',Arena.tick,os.clock())end
+  if M.connected or joined then elevators.poll()end
   local started=os.clock()
   if reconcile.count>0 then reconcile.run(.0007,3)end
   if actorRefresh then for i=1,12 do local a=actorRefresh.list[actorRefresh.at];if not a then actorIndex=actorRefresh.index;actorRefresh=nil;break end;actorRefresh.at=actorRefresh.at+1;indexActor(a,actorRefresh.index);if os.clock()-started>=.001 then break end end end
@@ -111,11 +162,25 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   end
  end
  local function live(b)return b and b.path and StaticFindObject(b.path)or nil end
- local function restore(a)
+ local function doorState(a)
+  if shrineGates.is(a)then return shrineGates.open(a)end
+  return a.Opened
+ end
+ local function animateDoor(a,b,opened)
+  Interaction.door(a,b,opened,shrineGates.is(a)and shrineGates.animate or nil)
+ end
+ local function restore(a,deferDoor)
   if not valid(a)then return end
   if elevators.is(a)then elevators.restore(a,gi.ActiveSaveSlot);return end
   local before=Interaction.before(a)
-  a.MySaveData:Empty();a:RestoreFromSave();Interaction.after(a,before)
+  a.MySaveData:Empty()
+  if joined and C.Role=='client' then
+   Campaign.restoreGuest(a,gi.ActiveSaveSlot,function()Offerings.restoreGuestPlate(a,function()a:RestoreFromSave()end)end)
+  else
+   a:RestoreFromSave()
+  end
+  Campaign.finishNetwork(a,gi.ActiveSaveSlot)
+  Interaction.after(a,before,deferDoor)
   if joined and C.Role=='client'then Books.lock(a)end
   stats.restored=stats.restored+1
  end
@@ -133,16 +198,33 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
  end
  local function reconcilePresentation(snapshot)
   if not snapshot then return end
+  for k,v in pairs(snapshot.levers)do
+   local key,wanted=k,v
+   reconcile.put('lever:'..key,function(work)replay.run(function()
+    if work.wanted~=wanted then work.wanted=wanted;work.pending=nil end
+    local a=live(actorIndex[key]);if valid(a)and a:IsA(StaticFindObject('/Game/LD45/Blueprints/Objects/Gate/Lever.Lever_C'))and(a.ToggledOn~=wanted or work.pending)then
+     work.pending=true;local before=Interaction.before(a);a.ToggledOn=wanted
+     if wanted and not a.DisableSaving then a['Restore to switched'](a)end
+     Interaction.after(a,before);work.pending=nil
+    end
+   end)end)
+  end
   for k,v in pairs(snapshot.doors)do
    local key,wanted=k,v
-   reconcile.put('door:'..key,function(work)replay.run(function()
+   reconcile.put('door:'..key,function(work)return replay.run(function()
     local a=live(actorIndex[key]);if valid(a)and a:IsA(StaticFindObject('/Game/Blueprints/Door_Base.Door_Base_C'))then
      if work.wanted~=wanted.open then work.wanted=wanted.open;work.action=nil end
      if a.CurrentActivationCount~=wanted.count then a.CurrentActivationCount=wanted.count end
+     local transition=doorTransitions[key]
+     if transition then
+      if transition.restore then return 'retry' end
+      doorTransitions[key]=nil
+      if transition.path==full(a)and transition.open==wanted.open then animateDoor(a,transition.before,wanted.open);return end
+     end
      if shrineGates.is(a)then
       -- Compare actual gate presentation, without letting the completed quest
       -- mask a still-closed local collision box during reconciliation.
-      local t=shrineGates.timeline(a);local open=t:IsPlaying()and not t:IsReversing()or(not t:IsPlaying()and t:GetPlaybackPosition()>=t:GetTimelineLength()-.001)
+      local open=shrineGates.open(a)
       if open~=wanted.open or work.action then work.action='shrine';shrineGates.apply(a,wanted.open);work.action=nil end
       return
      end
@@ -151,42 +233,80 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
     end
    end)end)
   end
-  for k,v in pairs(snapshot.levers)do
-   local key,wanted=k,v
-   reconcile.put('lever:'..key,function(work)replay.run(function()
-    if work.wanted~=wanted then work.wanted=wanted;work.pending=nil end
-    local a=live(actorIndex[key]);if valid(a)and a:IsA(StaticFindObject('/Game/LD45/Blueprints/Objects/Gate/Lever.Lever_C'))and(a.ToggledOn~=wanted or work.pending)then
-     work.pending=true;a.ToggledOn=wanted;if wanted then a['Restore to switched'](a)else a:AnimateLeverReset()end;work.pending=nil
-    end
-   end)end)
-  end
   for k,v in pairs(snapshot.gates or{})do
-   reconcile.put('encounter-gate:'..k,function()if not Gates.apply(v)then return 'retry' end end)
+   reconcile.put('encounter-gate:'..k,function()if not Gates.apply(v,Interaction.animatedDoor)then return 'retry' end end)
   end
  end
  local function restoreGuestActor(key)
-  local ok,err=pcall(replay.run,function()local a=live(actorIndex[key]);if valid(a)then restore(a)end end)
-  -- Native lever restore can activate a door after an older queued correction.
-  -- Reconcile again against the newest snapshot, including partial failures.
-  reconcilePresentation(applied)
-  if not ok then error(err)end
+  local a=live(actorIndex[key]);if not valid(a)then return 'retry'end
+  local door=a.GUIDs[1];local deferred=door and doorTransitions[guid(door)]
+  if deferred and deferred.path~=full(a)then deferred=nil end
+  replay.run(function()
+   restore(a,deferred~=nil)
+   if deferred then
+    animateDoor(a,deferred.before,deferred.open)
+    doorTransitions[guid(door)]=nil
+   end
+  end)
  end
  local function overlay(s,snapshot,initial)
   local fields=W.fields
   if localShopTravel then fields={};for name,kind in pairs(W.fields)do if not locationFields[name]then fields[name]=kind end end end
   local plan=Delta.plan(s,snapshot,fields,{
    asset=asset,resolve=resolve,name=FName,guid=guid,parseGuid=W.guid,
-   personal=function(name,key)return(localShopTravel and locationFields[name])or(name=='NamedSaveData'and W.personalName(key))or(pickupMaps[name]and pickupGUIDs[key])end
+   personal=function(name,key)return(localShopTravel and locationFields[name])or(name=='NamedSaveData'and W.personalName(key))or(pickupMaps[name]and personalGuid(key))end
   })
   -- No resource load, actor restoration or notification occurs while live save
   -- fields are being committed. A failed setter rolls back the touched keys.
   local ok,err=pcall(replay.run,function()Delta.commit(s,plan)end)
   overlayFault=not ok;if not ok then error(err)end
   stats.fieldWrites=(stats.fieldWrites or 0)+#plan.ops;stats.lastFieldWrites=#plan.ops
+  local prior=applied
   applied=snapshot;stats.snapshots=stats.snapshots+1
+  Arena.accept(snapshot.arena,os.clock())
+  if plan.names.ChefCrowDropoffEventComplete and(snapshot.fields.NamedSaveData.ChefCrowDropoffEventComplete or 0)>0 then
+   reconcile.put('chef-crow-finish',function(context)
+    context.done=context.done or{};local waiting=false
+    for _,script in ipairs(actors('/Game/Blueprints/ChefCrowEvent/ChefCrowEventScript.ChefCrowEventScript_C'))do
+     local npc=script.CrowNPC;local key=full(script)
+     if not context.done[key]and valid(npc)and npc.EventActive then
+      local p=npc['Player Interacting']
+      if valid(p)and valid(p.DialogueManager)and p.DialogueManager.RunningDialogue then waiting=true
+      else
+       script.EventActive=false
+       if not npc.FlyAway:IsPlaying()and not npc.Timeline_0:IsPlaying()then npc:DropPedestal()end
+       context.done[key]=true
+      end
+     end
+    end
+    if waiting then return'retry'end
+   end)
+  end
   if initial then return end
+  local restores={}
+  for key in pairs(plan.actors)do
+   local record=actorIndex[key]
+   if record then restores[record.path]=true end
+  end
+  -- Save restore can move a linked door to its endpoint before the door job
+  -- runs. Capture its earlier pose before any of the snapshot's actor jobs.
+  if prior and not spawnPending and prior.session==snapshot.session and prior.mapRevision==snapshot.mapRevision then
+   for key,wanted in pairs(snapshot.doors)do
+    local old=prior.doors[key]
+    if old and old.open~=wanted.open then
+     local a=live(actorIndex[key])
+     if valid(a)and a:IsA('/Game/Blueprints/Door_Base.Door_Base_C')then
+      if doorState(a)~=wanted.open then
+       local path=actorIndex[key].path
+       doorTransitions[key]={path=full(a),open=wanted.open,before=Interaction.doorBefore(a),restore=restores[path]}
+      else doorTransitions[key]=nil end
+     end
+    end
+   end
+  end
   for k in pairs(plan.actors)do
-   local key=k;reconcile.put('actor:'..key,function()restoreGuestActor(key)end)
+   local key=k;local record=actorIndex[key]
+   if record then reconcile.put('actor:'..record.path,function()return restoreGuestActor(key)end)end
   end
   reconcilePresentation(snapshot)
   if #plan.ops>0 then reconcile.put('notify',function()replay.run(function()gi:GI_NotifyWorldStateChanged()end)end)end
@@ -200,9 +320,22 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
    assert(valid(StaticFindObject(path)),'Missing world function '..path)
    local a,b;if post and path:match('^/Script/')then a,b=RegisterHook(path,function()end,fn)else a,b=RegisterHook(path,fn)end;hooks[#hooks+1]={path,a,b}
   end
+  hook('/Game/Blueprints/ActivationTrigger.ActivationTrigger_C:DoTrigger',function(ctx)
+   if not joined or C.Role~='client' or replay.active or spawnPending or not applied then return end
+   local a=ctx:get()
+   -- Saved triggers already send WC through their native save callback.
+   if valid(a) and a.DisableSaveOnlyOnce and CampaignTriggers.supports(a) then
+    write('out.events','WC|'..applied.session..'|'..guid(a.GUIDs[1])..'|0|1\n',true);stats.requests=stats.requests+1
+   end
+  end,true)
   for _,name in ipairs({'GI_NotifyWorldStateChanged','GI_SaveGameToDisk','GI_NotifyAreaChanged'})do
    hook('/Game/Blueprints/FS_GameInstance.FS_GameInstance_C:'..name,dirty,true)
   end
+  hook('/Game/Blueprints/SaveSystem/SaveFunctions.SaveFunctions_C:AddItemToInventory',function(_,item,amount)
+   if C.Role~='host'then return end
+   local ok,err=pcall(BossRewards.recordAdded,item:get(),amount:get())
+   if not ok then log('WORLD Boss handover observation failed: '..tostring(err))end
+  end,true)
   -- Native busy-lever messages can be empty and leave ReadTextUI consuming
   -- camera/attack input. A moving shared elevator simply ignores another pull.
   resolve('/Game/Blueprints/Elevator/Elevator_Base.Elevator_Base_C')
@@ -239,12 +372,14 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   hook('/Game/Blueprints/SaveSystem/SavableActor.SavableActor_C:Save Data Index to World Save',function(ctx,index,data)
    local a=ctx:get();dirty()
    if classifyPickup(a,false)then
-    if joined and valid(baseline)and not replay.active then copyPickups(gi.ActiveSaveSlot,baseline,pickupGUIDs)end
+    if joined and valid(baseline)and not replay.active then
+     local ids={};a.GUIDs:ForEach(function(_,g)ids[guid(g:get())]=true end);copyPickups(gi.ActiveSaveSlot,baseline,ids)
+    end
     return
    end
    if not joined or C.Role~='client'or replay.active or not applied or spawnPending then return end
    local i=index:get();local v=data:get();if not valid(a)or i<0 or i>=#a.GUIDs then return end
-   if Books.hostOnly(a)or a:IsA(StaticFindObject('/Game/Blueprints/BreakableBarricade/BreakableBarricade.BreakableBarricade_C'))then return end
+   if Necro.manager(a)or Books.hostOnly(a)or a:IsA(StaticFindObject('/Game/Blueprints/BreakableBarricade/BreakableBarricade.BreakableBarricade_C'))then return end
    local k=guid(a.GUIDs[i+1]);write('out.events','WC|'..applied.session..'|'..k..'|'..i..'|'..v..'\n',true);stats.requests=stats.requests+1
   end,true)
   hook('/Game/Blueprints/BreakableBarricade/BreakableBarricade.BreakableBarricade_C:TryApplyDamage',function(ctx,hit,damage,applier)
@@ -256,7 +391,10 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   hook('/Game/Player/FS_PlayerChar.FS_PlayerChar_C:FinishTeleport',function(ctx)
    if full(ctx:get())~=full(gs:GetPlayerPawn(gi,0))then return end
    if C.Role=='client'and shopRejoinPending then localShopTravel=false;shopRejoinPending=false end
-   if C.Role=='host'then travel=travel+1 elseif joined and not localShopTravel then spawnPending=true;lastAppliedStreams=''end
+   if C.Role=='host'then nativeTeleportPending=gs:GetRealTimeSeconds(ctx:get());travel=travel+1 elseif joined and not localShopTravel then spawnPending=true;lastAppliedStreams=''end
+  end,true)
+  hook('/Game/Player/FS_PlayerChar.FS_PlayerChar_C:SetTeleportedRecently',function(ctx)
+   if C.Role=='host'and full(ctx:get())==full(gs:GetPlayerPawn(gi,0))then nativeTeleportPending=gs:GetRealTimeSeconds(ctx:get())end
   end,true)
   for _,name in ipairs({'TeleportToShop','TeleportBackFromShop'})do
    hook('/Game/Player/FS_PlayerChar.FS_PlayerChar_C:'..name,function(ctx)
@@ -280,7 +418,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
     local lever=t:IsA(StaticFindObject('/Game/LD45/Blueprints/Objects/Gate/Lever.Lever_C'))
     local trigger=t:IsA(StaticFindObject('/Game/Blueprints/ActivationTrigger.ActivationTrigger_C'))
     local transient=(lever and t.DisableSaving)or(trigger and(not t.OnlyOnce or t.DisableSaveOnlyOnce))
-    if transient and #t.GUIDs>0 then write('out.events','DC|'..applied.session..'|'..guid(a.GUIDs[1])..'|'..guid(t.GUIDs[1])..'|'..delta..'\n',true);stats.requests=stats.requests+1 end
+    if transient and not CampaignTriggers.supports(t) and #t.GUIDs>0 then write('out.events','DC|'..applied.session..'|'..guid(a.GUIDs[1])..'|'..guid(t.GUIDs[1])..'|'..delta..'\n',true);stats.requests=stats.requests+1 end
    end,true)
   end
  end
@@ -298,7 +436,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
     if #t==1 then local x=t=='o'and asset(v)or(t=='n'and v:ToString()or(t=='b'and(v and '1'or'0')or tostring(v)));add('F',n,W.escape(x))
     else add('C',n);local rows={}
      if t=='ao'then v:ForEach(function(_,e)rows[#rows+1]='E|'..n..'|'..W.escape(asset(e:get()))end)
-     else v:ForEach(function(k,e)local key=t:sub(1,1)=='g'and guid(k:get())or k:get():ToString();if(n=='NamedSaveData'and W.personalName(key))or(pickupMaps[n]and pickupGUIDs[key])then return end;local x=t:sub(2)=='o'and asset(e:get())or tostring(e:get());rows[#rows+1]='E|'..n..'|'..W.escape(key)..'|'..W.escape(x)end)end
+     else v:ForEach(function(k,e)local key=t:sub(1,1)=='g'and guid(k:get())or k:get():ToString();if(n=='NamedSaveData'and W.personalName(key))or(pickupMaps[n]and personalGuid(key))then return end;local x=t:sub(2)=='o'and asset(e:get())or tostring(e:get());rows[#rows+1]='E|'..n..'|'..W.escape(key)..'|'..W.escape(x)end)end
      table.sort(rows);for _,r in ipairs(rows)do lines[#lines+1]=r end
     end
     job.index=job.index+1;return false
@@ -308,7 +446,16 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
    local lm=FindFirstOf('FS_LevelManager');if valid(lm)then for i,n in ipairs({'LevelListStack','TriggerLevelListStack'})do lm[n]:ForEach(function(_,e)local v=e:get();local p=asset(v.List);if p~=''then add('L',i,p,v.Priority)end end)end end
    job.phase=3;return false
   elseif job.phase==3 then
-   local doors,seen={},{};for _,a in ipairs(actors('/Game/Blueprints/Door_Base.Door_Base_C'))do if valid(a)and #a.GUIDs>0 then local k=guid(a.GUIDs[1]);if not seen[k]then doors[#doors+1]='D|'..k..'|'..(shrineGates.open(a,gi.ActiveSaveSlot) and 1 or 0)..'|'..a.CurrentActivationCount;seen[k]=true end end end;table.sort(doors);for _,d in ipairs(doors)do lines[#lines+1]=d end
+   local doors,seen={},{}
+   for _,a in ipairs(actors('/Game/Blueprints/Door_Base.Door_Base_C'))do
+    if #a.GUIDs>0 then local k=guid(a.GUIDs[1])
+     if not seen[k]then
+      local open=Interaction.savedDoorOpen(a,save);if open==nil then open=shrineGates.open(a,save)end
+      doors[#doors+1]='D|'..k..'|'..(open and 1 or 0)..'|'..a.CurrentActivationCount;seen[k]=true
+     end
+    end
+   end
+   table.sort(doors);for _,d in ipairs(doors)do lines[#lines+1]=d end
    job.phase=4;return false
   elseif job.phase==4 then
    local levers={};for _,a in ipairs(actors('/Game/LD45/Blueprints/Objects/Gate/Lever.Lever_C'))do if #a.GUIDs>0 then levers[#levers+1]='J|'..guid(a.GUIDs[1])..'|'..(a.ToggledOn and 1 or 0)end end;table.sort(levers);local previous;for _,l in ipairs(levers)do if l~=previous then lines[#lines+1]=l;previous=l end end
@@ -319,8 +466,11 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
    if job.gateIndex>=Gates.count then job.phase=6 end
    return false
   end
-  local body='R|'..mapRevision..'\nW|'..w..'\n'..table.concat(lines,'\n')..'\n'
+  arenaCall('capture',Arena.capture,add)
+  local body='R|'..mapRevision..'\nW|'..w..'\nMU|'..Music.capture(gi)..'\n'..table.concat(lines,'\n')..'\n'
   local pos=player:K2_GetActorLocation();if lastPos and(pos.X-lastPos.X)^2+(pos.Y-lastPos.Y)^2+(pos.Z-lastPos.Z)^2>2500^2 then travel=travel+1 end;lastPos={X=pos.X,Y=pos.Y,Z=pos.Z}
+  if travel~=M.lastTravel then teleportArrival=nativeTeleportPending and gs:GetRealTimeSeconds(player)-nativeTeleportPending<10 or false;nativeTeleportPending=false end
+  body=body..'TP|'..(teleportArrival and'1'or'0')..'\n'
   if body~=lastBody or travel~=M.lastTravel or read('out.world')==''then
    revision=revision+1;local raw=string.format('QDW1|%s|%d|%d\nP|%.3f|%.3f|%.3f|%.3f\n',token,revision,travel,pos.X,pos.Y,pos.Z,player:K2_GetActorRotation().Yaw)..body..'END\n'
    if not W.decode(raw)then write('world-invalid.txt',raw);error('World snapshot failed schema validation')end
@@ -337,7 +487,19 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   M.connected=connected;Travel.poll(connected)
   gi=FindFirstOf('FS_GameInstance_C');if not valid(gi)then return false end
   tickCount=tickCount+1
+  if (C.Role=='host'or(C.Role=='client'and joined and not spawnPending))and tickCount%10==0 then
+   GiantSerf.poll(gi,player,C.Role=='client')
+   StoryRewards.ensure(gi,player)
+   BossRewards.ensure(gi,player,C.Role=='client')
+   ensureRaiderRewards(gi.ActiveSaveSlot,player)
+   CollectRewards.ensure(gi,player,gs,C.Role=='client')
+  end
   if C.Role=='host'and valid(player)then
+   if replay.run(function()return Campaign.poll(gi,player,gs:GetRealTimeSeconds(player),gs)end)then dirty();lastBody=''end
+   if Beacons.poll(gi,player,os.clock(),gs)then dirty();lastBody=''end
+   if replay.run(function()return Offerings.poll(gi,player,gs:GetRealTimeSeconds(player),gs)end)then
+    dirty();lastBody=''
+   end
    install();if token==''then room=room+1;token=C.RunId..'_'..room end
    -- While the guest chooses/loads its character, keep the arrival position
    -- fresh even if the host only walks and changes no saved world properties.
@@ -382,7 +544,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
    end
    if not localShopTravel and latest and lastAppliedStreams~=streamsKey(latest.streams)then
     local q=player:K2_GetActorLocation();local p=frame and frame.P or nil
-    if p and (q.X-p.x)^2+(q.Y-p.y)^2+(q.Z-p.z)^2>2500^2 then spawnPending=true end
+    if p and (q.X-p.x)^2+(q.Y-p.y)^2+(q.Z-p.z)^2>streamRejoinDistance^2 then spawnPending=true end
     applyStreams(latest)
    end
    if spawnPending and latest and connected then
@@ -393,12 +555,17 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
      -- The faster motion channel can already be inside the next teleport's
      -- temporary sky room while this destination is still being loaded.
      local pos,yaw=latest.pos,latest.yaw
+     -- Native arrival triggers (including the first chef/crow greeting) check
+     -- DidRecentlyTeleport. Set it before overlaps fire; the native 2s timer
+     -- clears it. Ordinary join/reposition snapshots carry no teleport marker.
+     if latest.teleportArrival then player:SetTeleportedRecently()end
      player:K2_SetActorLocationAndRotation(pos,{Pitch=0,Yaw=yaw,Roll=0},false,{},true);player.CharacterMovement:StopMovementImmediately()
      player:GetController():SetControlRotation({Pitch=0,Yaw=yaw,Roll=0});refreshActors();overlay(gi.ActiveSaveSlot,latest,false)
      player.CharacterMovement:SetMovementMode(pausedMovement~=0 and pausedMovement or 1,0);pausedMovement=nil;spawnPending=false;stats.travels=stats.travels+1;log(string.format('WORLD guest arrived in host area travel=%d pos=%.1f,%.1f,%.1f',latest.travel,pos.X,pos.Y,pos.Z))
     end
    end
   end
+  if C.Role=='client'and joined and connected and latest and not spawnPending and not localShopTravel and tickCount%10==0 then Music.apply(gi,latest.music or latest.fields.PlayingMusicTrack)end
   if tickCount%10==0 then write('world-status.txt',string.format('role=%s joined=%s revision=%d applied=%d snapshots=%d restored=%d requests=%d accepted=%d saves=%d travels=%d pending=%s reconcile=%d reconcileFailures=%d fieldWrites=%d abandoned=%d overlayFault=%s\n',C.Role,tostring(joined==true),revision,applied and applied.revision or 0,stats.snapshots,stats.restored,stats.requests,stats.accepted,stats.saves,stats.travels,tostring(spawnPending==true),reconcile.count,reconcile.failures,stats.fieldWrites or 0,stats.abandoned or 0,tostring(overlayFault)))end
   return false
  end
@@ -406,7 +573,12 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   if C.Role~='host'or(f[2]~='WC'and f[2]~='WB'and f[2]~='DC')or f[3]~=token or not peer then return end
   if #f~=(f[2]=='WB'and 5 or 6)or not W.guid(f[4]or'')then return end
   local b=actorIndex[f[4]];local target=live(b);if not valid(target)then return f[2]=='WC'and'retry'or nil end
-  if isPickup(target)or Books.hostOnly(target)then return end
+  if isPickup(target)or Books.hostOnly(target)or Necro.manager(target)then return end
+  if f[2]=='WC' and f[5]=='0' and f[6]=='1' and CampaignTriggers.supports(target) then
+   if not CampaignTriggers.near(target,peer) then return end
+   replay.run(function()CampaignTriggers.activate(target)end)
+   dirty();lastBody='';stats.accepted=stats.accepted+1;return
+  end
   if f[2]=='DC'then
    local source=live(actorIndex[f[5]]);local delta=W.integer(f[6],-1,1);if #f~=6 or not delta or delta==0 or not valid(source)then return end
    local pos=source:K2_GetActorLocation();if(pos.X-peer.X)^2+(pos.Y-peer.Y)^2+(pos.Z-peer.Z)^2>1200^2 then return end
@@ -416,26 +588,41 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
    if not((lever and source.DisableSaving)or(trigger and(not source.OnlyOnce or source.DisableSaveOnlyOnce)))then return end
    replay.run(function()
     if delta==1 then a:Activate(false,source)else a:Deactivate(false,source)end
-    if lever and not source.ToggledOn then source.ToggledOn=true;source['Restore to switched'](source)end
+    if lever and not source.ToggledOn then local before=Interaction.before(source);source.ToggledOn=true;source['Restore to switched'](source);Interaction.after(source,before)end
    end);dirty();lastBody='';stats.accepted=stats.accepted+1;return
   end
   local a=target;local p=a:K2_GetActorLocation()
   local barrier=a:IsA(StaticFindObject('/Game/Blueprints/BreakableBarricade/BreakableBarricade.BreakableBarricade_C'))
   local lift=elevators.is(a)
   if lift then if not elevators.near(a,peer)then return end
+  elseif Campaign.network(a) then if not Campaign.nearNetwork(a,peer) then return end
   elseif(p.X-peer.X)^2+(p.Y-peer.Y)^2+(p.Z-peer.Z)^2>(barrier and 12000 or 1200)^2 then return end
   local n,v,amount
   if f[2]=='WB'then amount=W.number(f[5],0.001,10000);if #f~=5 or not barrier or not amount then return end
   else n=W.integer(f[5],0,32);v=W.integer(f[6],-100000,100000);if #f~=6 or n~=b.index or not v or barrier then return end end
+  if Campaign.network(a) and (n~=0 or v~=1) then return end
+  if Beacons.isSwitch(a)and(n~=0 or v~=1)then return end
+  if Necro.head(a)and(n~=0 or v~=1)then return end
   if lift and not elevators.accept(a,n,v)then return end
   if not barrier then
+   if n==0 and v==1 and a:IsA('/Game/Blueprints/ActivationTrigger.ActivationTrigger_C')
+     and a.OnlyOnce and not a.DisableSaveOnlyOnce and not a.OnlyOnceActivatesOnLoad then
+    local saved=gi.ActiveSaveSlot.SavableActorStates
+    local id=a.GUIDs[1]
+    if a.HasAlreadybeenTriggered or (saved:Contains(id) and saved:Find(id):get()>0) then return end
+    -- Execute the native first trigger before a saved flag can suppress it.
+    -- Never replay a historic flag: its downstream actions may be irreversible.
+    replay.run(function()a:DoTrigger()end)
+    dirty();lastBody='';stats.accepted=stats.accepted+1
+    return
+   end
    local ok,err=pcall(replay.run,function()a['Save Data Index to World Save'](a,n,v)end)
    if not ok then
     local key=W.guid(f[4]);local saved=gi.ActiveSaveSlot.SavableActorStates
     if not saved:Contains(key)or saved:Find(key):get()~=v then return 'retry' end
     log('WORLD recovered state write after error '..tostring(err))
    end
-   local key=f[4];reconcile.put('hostactor:'..key,function()replay.run(function()local actor=live(actorIndex[key]);if valid(actor)then restore(actor)end end)end)
+   local key=f[4];reconcile.put('hostactor:'..key,function()replay.run(function()local actor=live(actorIndex[key]);if valid(actor)then restore(actor);Beacons.repair(actor,gi.ActiveSaveSlot);if Necro.head(actor)then Necro.afterHead(actor,gi.ActiveSaveSlot)end end end)end)
    dirty();lastBody='';stats.accepted=stats.accepted+1;return
   end
   replay.run(function()
@@ -444,7 +631,7 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   end
   end);dirty();lastBody='';stats.accepted=stats.accepted+1
  end
- function M.resetMap()Books.reset();Travel.reset();localShopTravel=false;shopRejoinPending=false;reconcile.clear();overlayFault=false;changeVersion=changeVersion+1;snapshotJob=nil;actorRefresh=nil;actorIndex={};lastAppliedStreams='';pausedMovement=nil;mapRevision=mapRevision+1;if joined then spawnPending=true end end
+ function M.resetMap()elevators.reset();Interaction.reset();Music.reset(false);Books.reset();CollectRewards.resetMap();BossRewards.reset();GiantSerf.reset();Arena.reset();Travel.reset();localShopTravel=false;shopRejoinPending=false;reconcile.clear();doorTransitions={};overlayFault=false;changeVersion=changeVersion+1;snapshotJob=nil;actorRefresh=nil;actorIndex={};lastAppliedStreams='';pausedMovement=nil;mapRevision=mapRevision+1;if joined then spawnPending=true end end
  function M.checkpointReady(player)
   if overlayFault then return false end
   if C.Role=='client'and latest and(not applied or latest.session~=applied.session or latest.revision>applied.revision)then return false end
@@ -465,7 +652,10 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
  end
  function M.rollbackHost(save)
   if not valid(save)then return false end
-  local level=save.SaveLevel:ToString()
+  -- FS_GameInstance.Load Game(Death=true) reloads the current persistent map.
+  -- SaveLevel is legacy metadata and can legitimately remain None even in a
+  -- readable native save. Streaming/spawn data is restored by the saved state.
+  local level=gs:GetCurrentLevelName(gi,true):ToString()
   if not level:match('^[%w_/%.-]+$') or level=='None'then return false end
   rollbackListener(save)
   setSave(save)
@@ -473,13 +663,14 @@ return function(dir,C,valid,full,read,write,log,checkpoint)
   return true
  end
  function M.ended()
-  Books.reset();Travel.reset();localShopTravel=false;shopRejoinPending=false
-  M.connected=false;elevators.reset();reconcile.clear();overlayFault=false;changeVersion=changeVersion+1
+  nativeTeleportPending=false;teleportArrival=false
+  Interaction.reset()
+  Music.reset(true)
+  Books.reset();CollectRewards.resetMap();BossRewards.reset();GiantSerf.reset();Arena.reset();Travel.reset();localShopTravel=false;shopRejoinPending=false
+  M.connected=false;elevators.reset();reconcile.clear();doorTransitions={};overlayFault=false;changeVersion=changeVersion+1
   snapshotJob=nil;actorRefresh=nil
   M.cancelRollback()
-  if joined and valid(gi)and valid(baseline)and valid(gi.ActiveSaveSlot)then
-   local s=gi.ActiveSaveSlot;restorePersonalWorld(s,s)
-  end
+  -- Keep the last shared world in the selected character after leaving, too.
   unroot(baseline);unroot(diskCopy);baseline=nil;diskCopy=nil;joined=false;pending=false;latest=nil;applied=nil;lastRaw=nil;spawnPending=false;token='';lastBody='';lastPos=nil;lastAppliedStreams='';actorIndex={};write('out.world','')
  end
  function M.storyChanged()dirty();lastBody='';travel=travel+1;snapshotJob=nil end

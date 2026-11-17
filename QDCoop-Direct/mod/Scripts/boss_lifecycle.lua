@@ -10,10 +10,15 @@ return function(dir,C,M,valid,full,write,log)
   {path='/Game/Enemies/WhaleKing/Whaleking_Boss_BP.Whaleking_Boss_BP_C',fields={'CurrentStateIndex','DoingPhaseAttack','Phases Executed On'},component='InteractBox'},
  }
  profiles[#profiles+1]={path='/Game/Enemies/Boner_00/Skeletons24/ShrineBoss/Boner_Shrineboss_BP.Boner_Shrineboss_BP_C',fields={},component='Box'}
+ -- These overrides create reward pickups even when Kill(NoRewards) is used.
+ -- Treat guest death as presentation; only the authority executes handovers.
+ profiles[#profiles+1]={path='/Game/Enemies/Golem/Golem_WhiteTree_BP.Golem_WhiteTree_BP_C',fields={},component='InteractBox'}
+ profiles[#profiles+1]={path='/Game/Enemies/JosamiLord/BloodSisters/JosamiBloodLord_Sword_BP.JosamiBloodLord_Sword_BP_C',fields={'CurrentStateIndex','ActivePhaseIndex','StandaloneBoss'},component='InteractCollision'}
+ profiles[#profiles+1]={path='/Game/Enemies/JosamiLord/BloodSisters/JosamiBloodLord_Gun_BP.JosamiBloodLord_Gun_BP_C',fields={'CurrentStateIndex','ActivePhaseIndex','StandaloneBoss'},component='InteractCollision'}
  local B={profiles=profiles};local classes,cache={},{};local hooks={};local nextGuard=0;local seen={}
  local function profile(e)
   local key=full(e:GetClass());if cache[key]~=nil then return cache[key]or nil end
-  for i,p in ipairs(profiles)do local c=classes[i];if not valid(c)then c=StaticFindObject(p.path);classes[i]=c end;if valid(c)and e:IsA(c)then cache[key]=i;return i end end
+  for i=#profiles,1,-1 do local p=profiles[i];local c=classes[i];if not valid(c)then c=StaticFindObject(p.path);classes[i]=c end;if valid(c)and e:IsA(c)then cache[key]=i;return i end end
   cache[key]=false
  end
  function B.managed(r)

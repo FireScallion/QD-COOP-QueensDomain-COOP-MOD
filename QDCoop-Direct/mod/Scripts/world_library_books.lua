@@ -9,8 +9,11 @@ return function(valid, full)
  local function kind(a, name)
   if not valid(a) then return end
   local class = (name or full(a)):match('^([^ ]+) ')
-  if class == bookClass then return 'book' end
-  if class ~= gateClass then return end
+  if class == bookClass or class == 'MementoRecepticle_C' then return 'book' end
+  if class == 'AquaDoor_00_C' or class == 'JigekiDoor_BP_C' or class == 'DAquaDoor_01_C' then return 'keyDoor' end
+  if class == 'ROS_Treelock_Interaction_BP_C' then return 'orbs' end
+  if class == 'AQR_KeyRecepticle_BP_C' or class == 'AQ_OfferingPoint_BP_C' or class == 'SG_Pedestal_TridentKeyReceptacle_C' then return 'book' end
+  if class ~= gateClass and class ~= 'Ros_Cage_Gate_BP_C' then return end
   local record = locked[a:GetAddress()]
   if a.SetPuzzleNSD or (record and record.kind == 'gate') then return 'gate' end
  end
@@ -34,12 +37,16 @@ return function(valid, full)
    a.SetPuzzleNSD = false
    return
   end
-  a.InteractIsDisabled = true
-  local box = a.InteractBox
-  if valid(box) then
-   local collision = box:GetCollisionEnabled()
-   if record.collision == nil then record.collision = collision end
-   if collision ~= 0 then box:SetCollisionEnabled(0) end
+  if target == 'book' then a.InteractIsDisabled = true end
+  record.boxes = record.boxes or {}
+  local fields = target == 'orbs' and {'InteractBox0','InteractBox1','InteractBox2'} or {'InteractBox'}
+  for _,field in ipairs(fields) do
+   local box = a[field]
+   if valid(box) then
+    local collision = box:GetCollisionEnabled()
+    if record.boxes[field] == nil then record.boxes[field] = collision end
+    if collision ~= 0 then box:SetCollisionEnabled(0) end
+   end
   end
  end
 
@@ -50,9 +57,9 @@ return function(valid, full)
     if record.kind == 'gate' then
      a.SetPuzzleNSD = true
     else
-     a.InteractIsDisabled = record.disabled
-     if record.collision ~= nil and valid(a.InteractBox) then
-      a.InteractBox:SetCollisionEnabled(record.collision)
+     if record.kind == 'book' then a.InteractIsDisabled = record.disabled end
+     for field,collision in pairs(record.boxes or {}) do
+      if valid(a[field]) then a[field]:SetCollisionEnabled(collision) end
      end
     end
    end

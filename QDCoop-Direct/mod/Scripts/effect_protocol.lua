@@ -1,5 +1,12 @@
 local dir=debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])');local C=dofile(dir..'effect_catalog.lua');local P=dofile(dir..'protocol.lua');local Q=dofile(dir..'pose_math.lua')
 local extra=dofile(dir..'enemy_effect_catalog.lua');local known={};for _,v in ipairs(C.assets)do known[v.path]=true end;for _,v in ipairs(extra.assets)do if not known[v.path]then C.assets[#C.assets+1]=v;known[v.path]=true end end
+-- Live Poltergeists use the spawner's static furniture. Append these after
+-- the generated catalogs so previously assigned effect IDs stay stable.
+for _,path in ipairs({
+ '/Game/RuinsLevel/Library/props/Lib_Chair_00_SM.Lib_Chair_00_SM',
+ '/Game/RuinsLevel/Library/props/Lib_EndTable_00_SM.Lib_EndTable_00_SM',
+ '/Game/OldMapContent/Props/or_planter_01.or_planter_01',
+})do if not known[path]then C.assets[#C.assets+1]={path=path,kind='mesh'}end end
 known={};for _,v in ipairs(C.variables)do known[v]=true end;for _,v in ipairs(extra.variables)do if not known[v]then C.variables[#C.variables+1]=v;known[v]=true end end
 -- Preserve exact material parameter names: Niagara User.Opacity and material
 -- Opacity are different names, although the legacy FX API accepts the alias.

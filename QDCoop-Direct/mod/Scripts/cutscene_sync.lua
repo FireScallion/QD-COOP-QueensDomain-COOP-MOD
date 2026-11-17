@@ -3,6 +3,7 @@
 return function(dir,C,valid,full,read,write,log,world,enemies)
  local N=dofile(dir..'encounter_native.lua')(dir,valid)
  local W=dofile(dir..'world_protocol.lua')
+ local quorum=C.RoomProtocol==2 and dofile(dir..'scene_quorum.lua')(C)or nil
  local managers={
   '/Game/Cutscenes/Ending1/Ending1CutsceneManager.Ending1CutsceneManager_C',
   '/Game/Cutscenes/Ending2/Ending2CutsceneManager.Ending2CutsceneManager_C',
@@ -223,22 +224,22 @@ return function(dir,C,valid,full,read,write,log,world,enemies)
   end
   if not scene or gen~=scene.gen or id~=scene.manager then return end
   if C.Role=='host'and op=='R'then
-   scene.ready=true
+   if quorum then if not quorum.mark(scene,f[1],'ready')then return end else scene.ready=true end
    if scene.stage=='committed'then send('E',scene,tostring(scene.commitRevision));return end
-   if scene.stage=='waiting'then scene.stage='playing';scene.sequence:Play()end
-   send('P',scene,tostring(position(scene)))
+   if scene.stage=='waiting'and scene.ready then scene.stage='playing';scene.sequence:Play()end
+   if scene.stage~='waiting'then send('P',scene,tostring(position(scene)))end
   elseif C.Role=='client'and op=='P'and not scene.done then
    local t=W.number(f[9],0,7200);if not t then return end
    if scene.stage=='waiting'then seek(scene,t);scene.sequence:Play();scene.stage='playing'end
   elseif op=='K'and C.Role=='client'then
    skip(scene)
-  elseif C.Role=='host'and op=='F'then scene.peerDone=true
+  elseif C.Role=='host'and op=='F'then if quorum then quorum.mark(scene,f[1],'done')else scene.peerDone=true end
   elseif C.Role=='client'and op=='E'then
    local rev=W.integer(f[9],0,1e9);if not rev then return end
    if scene.stage=='committed'then send('Z',scene);return end
    skip(scene);scene.commitRevision=rev;scene.stage='settling';scene.progressDeadline=scene.progressDeadline or(context.now+15)
   elseif op=='Z'and scene.stage=='committed'then
-   scene.acked=true;if C.Role=='host'then send('Z',scene)end
+   if quorum and C.Role=='host'then quorum.mark(scene,f[1],'acked')else scene.acked=true end;if C.Role=='host'then send('Z',scene)end
   end
   report()
  end
@@ -250,6 +251,7 @@ return function(dir,C,valid,full,read,write,log,world,enemies)
    guardAt=now+1;for _,c in ipairs(callbacks)do N.guard(c.cls..':'..c.fn)end;N.guard(skipPath)
   elseif not connected then N.restore()end
   local s=scene;if not s then return end
+  if quorum and C.Role=='host'then quorum.refresh(s)end
   local lease=leases[maps[s.manager]]
   if s.stage~='committed'and lease and valid(lease.level)and not lease.level:IsLevelVisible()then lease.level:SetShouldBeLoaded(true);lease.level:SetShouldBeVisible(true)end
   if not s.noPlayback and(not valid(s.actor)or s.actor:IsActorBeingDestroyed()or not valid(s.sequence))then
@@ -262,7 +264,7 @@ return function(dir,C,valid,full,read,write,log,world,enemies)
    end
   else s.disconnected=nil end
   if s.stage=='waiting'then
-   if C.Role=='host'and(now-s.born>=8 or(s.disconnected and now-s.disconnected>=3))then s.stage='playing';s.sequence:Play();send('P',s,tostring(position(s)))
+   if C.Role=='host'and(s.ready or now-s.born>=8 or(s.disconnected and now-s.disconnected>=3))then s.stage='playing';s.sequence:Play();send('P',s,tostring(position(s)))
    else s.sequence:Pause()end
   elseif s.stage=='finished'then protect(s)end
   if C.Role=='host'and s.done and not s.committed and(s.peerDone or not connected or now-(s.finishedAt or now)>=3)then invoke(s)end

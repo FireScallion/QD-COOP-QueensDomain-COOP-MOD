@@ -34,13 +34,13 @@ function M.plan(save,snapshot,fields,api)
     local prior=old[key]
     if not prior or canonical(t:sub(2),prior.value)~=value then
      add(name,t:sub(1,1)=='g'and api.parseGuid(key)or api.name(key),prior and prior.value,prepare(t:sub(2),value),prior~=nil,true)
-     if name=='SavableActorStates'then changed[key]=true elseif name=='NamedSaveData'then names[key]=true end
+     if name=='SavableActorStates'or name=='SavableActorItems'then changed[key]=true elseif name=='NamedSaveData'then names[key]=true end
     end
     old[key]=nil
    end end
    for key,prior in pairs(old)do
     add(name,t:sub(1,1)=='g'and api.parseGuid(key)or api.name(key),prior.value,nil,true,false)
-    if name=='SavableActorStates'then changed[key]=true elseif name=='NamedSaveData'then names[key]=true end
+    if name=='SavableActorStates'or name=='SavableActorItems'then changed[key]=true elseif name=='NamedSaveData'then names[key]=true end
    end
   end
  end

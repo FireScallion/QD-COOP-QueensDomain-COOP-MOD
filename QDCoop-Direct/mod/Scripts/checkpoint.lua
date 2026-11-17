@@ -1,6 +1,8 @@
 -- The native primary slot remains the regular save. Immutable copies are paired
 -- by a host commit record so a partial save can never replace a shared checkpoint.
 return function(C, P, write, log, valid)
+ local dir=assert(debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])'))
+ local gameAPI=dofile(dir..'game_api.lua')()
  local M = {}
  local WAIT = 15
  local context, pending, prepared, requested
@@ -12,6 +14,8 @@ return function(C, P, write, log, valid)
  local guard=function()return true end
  local deferredSave=false
  local initialCheckpoint=false
+ local multi=C.RoomProtocol==2
+ local requests,handled={},{}
  function M.setGuard(fn)guard=fn end
  function M.busy()return pending~=nil or prepared~=nil or requested~=nil end
 
@@ -74,7 +78,25 @@ return function(C, P, write, log, valid)
   status()
  end
 
- local function send(op, id, request)
+ local function participantEpoch(member)
+  local p=C.RoomPeers and C.RoomPeers[member]
+  return p and p.frame and p.frame.T and p.frame.T.session
+ end
+ local function participants()
+  local result={};local count=0
+  for member,p in pairs(C.RoomPeers or{})do
+   if not p.frame or p.frame.P.world~=context.world or not p.frame.T then return end
+   result[member]=p.frame.T.session;count=count+1
+  end
+  if count>0 then return result end
+ end
+ local function send(op, id, request, recipient)
+  if multi and C.Role=='host'then
+   for member in pairs(C.RoomPeers or{})do if not recipient or recipient==member then
+    local epoch=participantEpoch(member)
+    if epoch then write('out.events',table.concat({'TO',member,'CP',context.world,context.epoch,epoch,op,id or'-',request or 0},'|')..'\n',true)end
+   end end;return
+  end
   write('out.events', table.concat({
    'CP', context.world, context.epoch, context.peer, op, id or '-', request or 0
   }, '|') .. '\n', true)
@@ -87,6 +109,7 @@ return function(C, P, write, log, valid)
   commitNotice=nil
   deferredSave=false
   initialCheckpoint=false
+  requests,handled={},{}
   message = ''
   status()
  end
@@ -102,6 +125,16 @@ return function(C, P, write, log, valid)
 
  local function saveAndStage(id, alreadySaved)
   return pcall(function()
+   if alreadySaved then
+    local f,err,code=io.open(context.primary,'rb')
+    if f then f:close()
+    elseif code==2 then
+     -- A character can enter from a suspend/backup slot before a primary file
+     -- exists. Materialize the loaded state through the native save path;
+     -- otherwise the first shared checkpoint can never be established.
+     alreadySaved=false
+    else error('Cannot read native primary save: '..tostring(err))end
+   end
    if not alreadySaved then
     local before = nativeWrites
     writing = true
@@ -125,27 +158,32 @@ return function(C, P, write, log, valid)
  end
 
  local function beginHost(now, initial)
+  local members=multi and participants()or nil
+  if multi and not members then initialCheckpoint=initial or initialCheckpoint;return end
   serial = serial + 1
   local request, alreadySaved = queuedRequest, localSaved
   handledRequest = math.max(handledRequest, request)
   queuedRequest, localSaved = 0, false
-  local transaction = {id = context.epoch .. '_' .. serial, request = request, initial = initial, deadline = now + WAIT, retry = now + 1}
+  local transaction = {id = context.epoch .. '_' .. serial, request = request, initial = initial, deadline = now + WAIT, retry = now + 1,guests=members,ready={},requests={}}
+  if multi then for member in pairs(members)do transaction.requests[member]=requests[member]or 0;requests[member]=nil end end
   pending = transaction
   local ok, err = saveAndStage(transaction.id, initial or alreadySaved)
   if pending ~= transaction then return end
   if not ok then abortHost(tostring(err)); return end
-  send(initial and 'BASE' or 'PREPARE', pending.id, request)
-  report('waiting for guest ' .. pending.id)
+  if multi then for member in pairs(members)do send(initial and'BASE'or'PREPARE',pending.id,pending.requests[member],member)end
+  else send(initial and 'BASE' or 'PREPARE', pending.id, request)end
+  report('waiting for all guests ' .. pending.id)
  end
 
  local function finishHost(request)
   local id = pending.id
+  local members=pending.guests
   handledRequest = math.max(handledRequest, request)
   if queuedRequest <= handledRequest then queuedRequest = 0 end
   local ok, err = pcall(writeFile, context.prefix .. '.host.log', '\nQDCP1|' .. id .. '\n', 'ab')
   if not ok then abortHost(tostring(err)); return end
   latest, pending = id, nil
-  commitNotice={id=id,retry=context.now+1,deadline=context.now+WAIT+2}
+  commitNotice={id=id,retry=context.now+1,deadline=context.now+WAIT+2,guests=members}
   send('COMMIT', id)
   report('committed ' .. id)
  end
@@ -180,21 +218,30 @@ return function(C, P, write, log, valid)
 
  function M.event(fields)
   if #fields ~= 8 or fields[2] ~= 'CP' or not context or not context.ready then return end
-  if fields[3] ~= context.world or fields[4] ~= context.peer or fields[5] ~= context.epoch then return end
+  local sender=multi and fields[1]:match('^(%x+)%-')or nil
+  local expected=multi and C.Role=='host'and participantEpoch(sender)or context.peer
+  if multi and(not sender or not C.Room or(C.Role=='client'and sender~=C.Room.host)or(C.Role=='host'and not participantEpoch(sender)))then return end
+  if fields[3] ~= context.world or fields[4] ~= expected or fields[5] ~= context.epoch then return end
   local op, id = fields[6], fields[7]
   local request = P.number(fields[8], 0, 1e9)
   if not request or request % 1 ~= 0 or not P.id(id) then return end
   if C.Role == 'host' then
    if op == 'HELLO' then
-    send('STATE', latest)
+    send('STATE', latest,0,sender)
    elseif op=='COMMITTED'and commitNotice and id==commitNotice.id then
-    commitNotice=nil
+    if multi then commitNotice.guests[sender]=nil;if not next(commitNotice.guests)then commitNotice=nil end else commitNotice=nil end
    elseif op=='READY'and id==latest then
-    send('COMMIT',id)
-   elseif op == 'REQUEST' and request > handledRequest then
-    queuedRequest = math.max(queuedRequest, request)
-   elseif pending and id == pending.id then
-    if op == 'READY' and request >= pending.request then finishHost(request)
+    send('COMMIT',id,0,sender)
+   elseif op == 'REQUEST' and request > (multi and(handled[sender]or 0)or handledRequest) then
+    if multi then requests[sender]=math.max(requests[sender]or 0,request);queuedRequest=1 else queuedRequest = math.max(queuedRequest, request)end
+   elseif pending and id == pending.id and(not multi or pending.guests[sender]==expected)then
+    if op=='READY'and multi then
+     if pending.guests[sender]~=expected or request<(pending.requests[sender]or 0)then return end
+     pending.ready[sender]=true;handled[sender]=math.max(handled[sender]or 0,request)
+     if requests[sender]and requests[sender]<=handled[sender]then requests[sender]=nil end
+     for member,epoch in pairs(pending.guests)do if participantEpoch(member)~=epoch or not pending.ready[member]then return end end
+     finishHost(0);queuedRequest=next(requests)and 1 or 0
+    elseif op == 'READY' and request >= pending.request then finishHost(request)
     elseif op == 'FAILED' then
      handledRequest = math.max(handledRequest, request)
      if queuedRequest <= handledRequest then queuedRequest = 0 end
@@ -233,17 +280,34 @@ return function(C, P, write, log, valid)
    if context then M.reset() end
    return
   end
+  if multi and C.Role=='host'and context then
+   local changed=context.roomRevision~=(C.Room and C.Room.revision)
+   context.memberEpochs=context.memberEpochs or{}
+   for member in pairs(C.RoomPeers or{})do local current=participantEpoch(member)
+    if current and context.memberEpochs[member]~=current then
+     if context.memberEpochs[member]or(pending and pending.guests[member]~=current)then changed=true;handled[member]=nil;requests[member]=nil end
+     context.memberEpochs[member]=current
+    end
+   end
+   if changed then
+    if pending then abortHost('room membership or player life changed during prepare')end
+    context.roomRevision=C.Room and C.Room.revision;initialCheckpoint=true
+    for member in pairs(context.memberEpochs)do if not(C.RoomPeers or{})[member]then context.memberEpochs[member]=nil;requests[member]=nil;handled[member]=nil end end
+   end
+  end
   local ready = stable and frame and frame.P.world == world
+  if multi and C.Role=='host'then
+   for _,p in pairs(C.RoomPeers or{})do if not p.frame or p.frame.P.world~=world then ready=false end end
+  end
   if not ready or not valid(gi.ActiveSaveSlot) then
    if context and context.ready then context.ready = false; status() end
    return
   end
-  local peer = frame.T.session
+  local peer = multi and C.Role=='host'and C.Room.session or frame.T.session
   local index = gi:GetActiveSaveSlotIndex()
   if index < 0 then return end
   if not context or context.epoch ~= epoch or context.peer ~= peer or context.index ~= index then
-   local utils = StaticFindObject('/Script/QueensDomain.BlueprintUtils'):GetCDO()
-   local slot = utils:GetSaveSlotName(index, false, false, false, 0):ToString():gsub('\\', '/')
+   local slot = gameAPI.slotName(index, false, false, false, 0, 0):gsub('\\', '/')
    local directory = C.ExpectedSaveDirectory:gsub('\\', '/'):gsub('/+$', '') .. '/SaveGames/'
    local primary = slot:match('^FULLPATH:(.+)$')
    local relative = slot
@@ -262,7 +326,7 @@ return function(C, P, write, log, valid)
     gi = gi, slot = slot, index = index, world = world, epoch = epoch, peer = peer,
     primary = primary or directory .. relative .. '.sav',
     prefix = directory .. (parent or '') .. 'QDCoopCP_' .. (leaf or relative),
-    now = now, ready = true, helloAt = 0,
+    now = now, ready = true, helloAt = 0,roomRevision=C.Room and C.Room.revision,
    }
    if C.Role == 'host' then loadCommit();initialCheckpoint=true else syncPending = true end
    status()
@@ -283,12 +347,16 @@ return function(C, P, write, log, valid)
   if C.Role == 'host' then
    if commitNotice then
     if now>=commitNotice.deadline then commitNotice=nil
-    elseif now>=commitNotice.retry then send('COMMIT',commitNotice.id);commitNotice.retry=now+1 end
+    elseif now>=commitNotice.retry then
+     if multi then for member in pairs(commitNotice.guests)do if participantEpoch(member)then send('COMMIT',commitNotice.id,0,member)else commitNotice.guests[member]=nil end end
+     else send('COMMIT',commitNotice.id)end;commitNotice.retry=now+1
+    end
    end
    if pending then
     if now >= pending.deadline then abortHost('guest timed out')
     elseif now >= pending.retry then
-     send(pending.initial and 'BASE' or 'PREPARE', pending.id, pending.request)
+     if multi then for member in pairs(pending.guests)do if not pending.ready[member]then send(pending.initial and'BASE'or'PREPARE',pending.id,pending.requests[member],member)end end
+     else send(pending.initial and 'BASE' or 'PREPARE', pending.id, pending.request)end
      pending.retry = now + 1
     end
    elseif initialCheckpoint then

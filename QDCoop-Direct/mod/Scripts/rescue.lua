@@ -1,5 +1,6 @@
 return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
  local M = {}
+ local room=C.RoomProtocol==2 and dofile(dir..'rescue_room.lua')(C,write)or nil
  local duration, range = 2.6, 235
  local playerClass = '/Game/Player/FS_PlayerChar.FS_PlayerChar_C:'
  local saveFunctions = '/Game/Blueprints/SaveSystem/SaveFunctions.Default__SaveFunctions_C'
@@ -67,6 +68,7 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
  end
 
  local function send(action, target, attempt, value)
+  if room then return room.send(context,room.peers[context.peerId],action,target,attempt,value)end
   write('out.events', table.concat({
    'RV', context.world, context.epoch, context.peer, action, target, attempt, value or '-'
   }, '|') .. '\n', true)
@@ -94,20 +96,20 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
   return item, name, codes[name] or 0
  end
 
- local function near()
-  local a, b = context.player:K2_GetActorLocation(), context.peerPosition
+ local function near(peer)
+  local a, b = context.player:K2_GetActorLocation(), peer and peer.position or context.peerPosition
   return b and (a.X-b.x)^2 + (a.Y-b.y)^2 + (a.Z-b.z)^2 <= range^2
  end
 
- local function canRescue()
+ local function canRescue(peer)
   local p = context.player
-  if down or pendingDown or not context.ready or context.peerDown == 0 then return false, 'partner state changed' end
-  if not near() then return false, 'out of range' end
+  if down or pendingDown or not context.ready or(peer and peer.down or context.peerDown or 0)==0 then return false, 'partner state changed' end
+  if not near(peer) then return false, 'out of range' end
   if p.IsInGameplayModal or p.PlayerInteractionComponent.DisableInteraction or not p:CanInteractFlags() then return false, 'interaction unavailable' end
   local manager = gs:GetPlayerCameraManager(p, 0)
   if not valid(manager) then return false, 'camera unavailable' end
   local start = manager:GetCameraLocation()
-  local b = context.peerPosition
+  local b = peer and peer.position or context.peerPosition
   local rot = p:GetControlRotation()
   local yaw, pitch = math.rad(rot.Yaw), math.rad(rot.Pitch)
   local dx, dy, dz = b.x-start.X, b.y-start.Y, b.z-62-start.Z
@@ -115,6 +117,17 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
   if along < 0 or dx*dx+dy*dy+dz*dz-along*along > 65^2 then return false, 'aim at partner' end
   return not system:LineTraceSingle(p, start, {X=b.x,Y=b.y,Z=b.z-58},
    0, false, {p}, 0, {}, true, {R=0,G=0,B=0,A=0}, {R=0,G=0,B=0,A=0}, 0), 'obstructed'
+ end
+
+ local function selectPeer()
+  if not room or not context then return end
+  local peer=room.pick(charge and charge.peerId,function(p)
+   local ok=canRescue(p);local a=context.player:K2_GetActorLocation();local b=p.position
+   return ok,(a.X-b.x)^2+(a.Y-b.y)^2+(a.Z-b.z)^2
+  end)
+  context.peerId=peer and peer.id;context.peer=peer and peer.epoch
+  context.peerPosition=peer and peer.position;context.peerDown=peer and peer.down or 0
+  rescuePeer=peer and peer.identity;peerLife=peer and peer.life;peerLifeDown=peer and peer.lifeDown
  end
 
  local function beginCharge()
@@ -126,7 +139,7 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
   attemptSerial = attemptSerial + 1
   attempted = true
   diagnostic = ''
-  charge = {phase='holding', id=attemptSerial, target=context.peerDown, selection=name,
+  charge = {phase='holding', id=attemptSerial, target=context.peerDown, selection=name,peerId=context.peerId,
    item=code, started=context.now, health=context.player.Health, life=peerLife, recipient=rescuePeer}
   progress = .001
   status()
@@ -146,6 +159,15 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
   p.bCanBeDamaged = old.damage
   p.Arms:SetVisibility(old.arms, false)
   p.CharacterMovement:SetMovementMode(old.mode == 0 and 1 or old.mode, 0)
+ end
+
+ local function offerCharge(a)
+  if a.phase~='holding' then return end
+  -- Completion belongs to the local hold clock, not the network round trip.
+  -- Once full, releasing E or moving the crosshair must not revoke the offer.
+  a.phase,a.expires='offered',context.now+30
+  local ok,serial=recovery(function()return transaction and transaction.begin(a.recipient,a.life,a.item)end)
+  if ok and serial then a.id=serial;report('charge complete; awaiting rescue confirmation')else cancelCharge()end
  end
 
  local function enterDown()
@@ -208,17 +230,18 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
     Z=origin.Z + start.Z*(1-alpha) + (20-height)*alpha
    },false,{},true)
   end
+  selectPeer()
   aimed = context.ready and canRescue() or false
   -- InteractHeld is the native mapped action, including E and controller input.
   -- Charge is local and requires the mapped interaction action to stay held.
   local pressed = context.player.InteractHeld == true
   if pressed and not held then attempted=false end
   held=pressed
-  if not held and charge then cancelCharge();diagnostic='charge interrupted: released';status()end
+  if not held and charge and charge.phase=='holding' then cancelCharge();diagnostic='charge interrupted: released';status()end
   beginCharge()
   if charge and charge.phase=='holding' then
    if not aimed then cancelCharge()
-   else progress=math.min(1,(now-charge.started)/duration) end
+   else progress=math.min(1,(now-charge.started)/duration);if progress==1 then offerCharge(charge)end end
   end
  end
 
@@ -273,6 +296,7 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
   pendingDown, restoreBar, diagnostic = false, false, ''
   held, attempted, aimed = false, false, false
   transaction=nil;persistence.reset();rescuePeer,peerLife,peerLifeDown=nil,nil,nil;nextHello=0
+  if room then room.reset()end
   pendingNativeReceipt=nil
   cancelPending=nil
   status()
@@ -288,14 +312,17 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
   if not a or a.phase~='offered'or a.id~=t.serial or a.life~=t.life or a.item~=t.code or a.recipient~=t.recipient then
    if transaction then transaction.cancel(t.serial)end;return
   end
-  if not context.player.InteractHeld or not canRescue()or context.peerDown~=a.target then cancelCharge();return end
-  local item,name=selected()
-  if name~=a.selection or(t.code>0 and count(item)<1)then cancelCharge();return end
+  if down or pendingDown or not context.ready or not near()or context.peerDown~=a.target then cancelCharge();report('completed rescue cancelled: recipient or rescuer changed');return end
+  if t.code>0 and persistence.inventory(t.code)<1 then cancelCharge();report('completed rescue cancelled: medicine unavailable');return end
   if transaction.commit(t.serial)then charge,progress=nil,0;report('durable rescue sent item='..t.code)end
  end
 
  local function sendTransaction(op,t)
   if not context or not context.ready then return end
+  if room then
+   local recipient=transaction.identity()==t.donor and t.recipient or t.donor
+   return room.send(context,room.find(recipient),op,t.donor,t.serial,table.concat({t.recipient,t.life,t.code},'~'))
+  end
   write('out.events',table.concat({'RV',context.world,context.epoch,context.peer,op,t.donor,t.serial,
    table.concat({t.recipient,t.life,t.code},'~')},'|')..'\n',true)
  end
@@ -312,7 +339,10 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
     return persistence.receipt(t)
    end,
    ready=function(t)readyOffer(t)end,
-   prepare=function(t)return context and context.ready and life()==t.life and context.peerDown==0 and near()and not wipe end,
+   prepare=function(t)
+    local peer=room and room.find(t.donor)
+    return context and context.ready and life()==t.life and(room and peer and peer.down==0 or not room and context.peerDown==0)and near(peer)and not wipe
+   end,
    apply=function(t)
     if not context or life()~=t.life then return false end
     local old=down;local ok,err=pcall(revive,t.code)
@@ -333,22 +363,25 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
  local function identity(s)return type(s)=='string'and #s<=150 and s:match('^[%w_%-]+$')end
  function M.event(fields)
   if #fields~=9 or fields[2]~='RV'or not context or not context.ready then return end
-  if fields[3]~=context.world or fields[4]~=context.peer or fields[5]~=context.epoch then return end
+  if fields[3]~=context.world or fields[5]~=context.epoch then return end
+  local source=room and room.source(fields)
+  if room and not source or not room and fields[4]~=context.peer then return end
   local action,value=fields[6],fields[9]
   if action=='HELLO2'then
    local n=P.number(fields[8],0,1e9)
    if identity(fields[7])and n and n%1==0 and(value=='-'or P.id(value))then
-    rescuePeer,peerLifeDown,peerLife=fields[7],n,value
-    if transaction then recovery(function()transaction.poll(rescuePeer)end)end
+    if room then source.identity=fields[7];source.lifeDown=n;source.life=value else rescuePeer,peerLifeDown,peerLife=fields[7],n,value end
+    if transaction then recovery(function()transaction.poll(room and room.identities()or rescuePeer)end)end
    end;return
   end
   if action:match('^[PRCDXNA]2$')then
-   if not transaction or not rescuePeer then return end
+   local sender=source and source.identity or rescuePeer
+   if not transaction or not sender then return end
    local who,token,code=value:match('^([^~]+)~([^~]+)~(%d+)$');local serial=P.number(fields[8],1,1e9);code=tonumber(code)
    if identity(fields[7])and identity(who)and P.id(token)and serial and serial%1==0 and code and code>=0 and code<=#items then
     -- A rejection may itself resolve a missing-item debit. Do not let the
     -- background retry backoff starve the response which repairs that failure.
-    local ok=recovery(function()transaction.event(action,{donor=fields[7],recipient=who,life=token,code=code,serial=serial})end,true)
+    local ok=recovery(function()transaction.event(action,{donor=fields[7],recipient=who,life=token,code=code,serial=serial},sender)end,true)
     if not ok then return'retry'end
    end;return
   end
@@ -356,6 +389,22 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
   -- Mixed versions cannot enter a drug-consuming rescue without HELLO2.
   local target,attempt=P.number(fields[7],1,1e9),P.number(fields[8],1,1e9)
   if not target or not attempt or target%1~=0 or attempt%1~=0 then return end
+  if room then
+   if action=='WPREP'and C.Role=='client'and source.id==C.Room.host and M.id()==target and source.down==attempt then
+    if not wipe or wipe.id~=value then
+     local save=value~='-'and checkpoint.open(value)
+     if not save or pendingCommit()or not worldSync.stageRollback(save)then room.send(context,source,'WFAIL',target,attempt,value);return end
+     wipe={id=value,target=target,attempt=attempt};report('guest checkpoint prepared '..value)
+    end
+    room.send(context,source,'WREADY',target,attempt,value)
+   elseif C.Role=='host'and wipe and wipe.id==value and M.id()==attempt then
+    local expected=wipe.members and wipe.members[source.id]
+    if expected and expected.epoch==source.epoch and expected.down==target then
+     if action=='WREADY'then wipe.ready[source.id]=true elseif action=='WFAIL'then wipe.failed=true end
+    end
+   end
+   return
+  end
   if action=='WPREP'and C.Role=='client'and M.id()==target and context.peerDown==attempt then
    if not wipe then
     local save=value~='-'and checkpoint.open(value)
@@ -390,6 +439,21 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
    if context then M.reset() end
    return false
   end
+  if room then
+   room.update(world,now)
+   if not context or context.epoch~=epoch then
+    context={player=player,gi=gi,world=world,epoch=epoch,peerDown=0};cancelCharge();wipe,leaving=nil,nil;nextHello=0
+   end
+   context.player,context.gi=player,gi;context.now=now
+   local any=false;for _,p in pairs(room.peers)do if p.ready then any=true;break end end
+   context.ready=any and(stable or down~=nil);context.armed=any and stable
+   if C.Role=='client'and wipe then
+    local host=room.peers[C.Room.host]
+    if not host or not host.ready or host.down~=wipe.attempt or M.id()~=wipe.target then wipe=nil;worldSync.cancelRollback()end
+   end
+   selectPeer()
+   if not context.ready then cancelCharge();status();return false end
+  else
   if not frame and context and now-context.seenAt <= 8 then frame = context.lastFrame end
   if not frame or not frame.T or frame.P.world ~= world then
    if context then context.ready, context.armed = false, false end
@@ -414,16 +478,19 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
   end
   context.ready, context.armed = stable or down ~= nil, stable
   context.now, context.peerPosition, context.peerDown = now, frame.P, frame.downed or 0
+  end
   if pendingDown then enterDown(); context.ready = true end
   if down and player.CharacterMovement.MovementMode ~= 0 and not player.CharacterMovement:IsFalling() then
    player.CharacterMovement:DisableMovement()
   end
   if leaving and now >= leaving then return exitRoom() end
   if transaction then
-   recovery(function()transaction.poll(rescuePeer)end)
+   recovery(function()transaction.poll(room and room.identities()or rescuePeer)end)
    if pendingCommit()and charge then charge,progress=nil,0 end
    if os.clock()>=nextHello then
-    write('out.events',table.concat({'RV',context.world,context.epoch,context.peer,'HELLO2',transaction.identity(),M.id(),life()},'|')..'\n',true);nextHello=os.clock()+.8
+    if room then for _,p in pairs(room.peers)do room.send(context,p,'HELLO2',transaction.identity(),M.id(),life())end
+    else write('out.events',table.concat({'RV',context.world,context.epoch,context.peer,'HELLO2',transaction.identity(),M.id(),life()},'|')..'\n',true)end
+    nextHello=os.clock()+.8
    end
    if os.clock()>=nextRecoveryStatus then
     nextRecoveryStatus=os.clock()+1
@@ -437,26 +504,43 @@ return function(dir, C, P, valid, full, write, log, checkpoint, worldSync)
    local item, name = selected()
    local a = charge
    local allowed, reason = canRescue()
-   if not player.InteractHeld or not allowed or context.peerDown ~= a.target or name ~= a.selection
-    or (a.item > 0 and count(item) < 1) or player.Health < a.health - .1 or (a.expires and now > a.expires) then
+   if (a.phase=='holding' and (not player.InteractHeld or not allowed or name ~= a.selection
+    or (a.item > 0 and count(item) < 1) or player.Health < a.health - .1))
+    or context.peerDown ~= a.target or (a.expires and now > a.expires) then
     cancelCharge()
     report('charge interrupted: ' .. (not allowed and reason or 'state or selection changed'))
    elseif a.phase == 'holding' then
     a.health = math.max(a.health, player.Health)
     progress = math.min(1, (now - a.started)/duration)
     if progress == 1 then
-     a.phase, a.expires = 'offered', now+5
-     local ok,serial=recovery(function()return transaction and transaction.begin(a.recipient,a.life,a.item)end)
-     if serial then a.id=serial else cancelCharge()end
+     offerCharge(a)
     end
    end
   end
-  if C.Role == 'host' and down and context.peerDown > 0 and not leaving and not pendingCommit() and not reservation then
+  if room and C.Role=='host'then
+   local members=down and not leaving and not pendingCommit()and room.allDown()
+   if wipe and(not members or not room.sameDown(wipe.members))then wipe=nil;worldSync.cancelRollback()end
+   if members then
+    if not wipe then wipe={id=checkpoint.latest()or'-',members=members,ready={},retry=0,expires=now+10}end
+    local ready=true;for id in pairs(members)do if not wipe.ready[id]then ready=false end end
+    if ready and not wipe.failed then
+     local save=checkpoint.open(wipe.id)
+     if save and worldSync.rollbackHost(save)then return true end
+     wipe.failed=true
+    end
+    if wipe.failed or wipe.id=='-'or now>wipe.expires then
+     if now>=wipe.retry then wipe.id=checkpoint.latest()or'-';wipe.failed=nil;wipe.ready={};wipe.retry=now+2;wipe.expires=now+10;report('checkpoint not ready; retrying without leaving room')end
+    elseif now>=wipe.retry then
+     for id,p in pairs(members)do if not wipe.ready[id]then room.send(context,room.peers[id],'WPREP',p.down,down.id,wipe.id)end end
+     wipe.retry=now+1
+    end
+   end
+  elseif not room and C.Role == 'host' and down and context.peerDown > 0 and not leaving and not pendingCommit() and not reservation then
    if not wipe then
     local id = checkpoint.latest()
     wipe = {id=id or '-', target=context.peerDown, attempt=down.id, retry=0, expires=now+10}
    end
-   if wipe.go then
+   if wipe.go and not wipe.failed then
     local save = checkpoint.open(wipe.id)
     if save then
      report('loading shared checkpoint ' .. wipe.id)

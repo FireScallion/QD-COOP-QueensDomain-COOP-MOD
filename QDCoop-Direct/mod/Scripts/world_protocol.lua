@@ -2,9 +2,10 @@
 local M={limit=1048576}
 local dir=debug.getinfo(1,'S').source:gsub('^@',''):match('^(.*[/\\])')
 local Gates=dofile(dir..'encounter_gates.lua')
+local Arena=dofile(dir..'arena_environment.lua')
 local personalNames=dofile(dir..'personal_progress_names.lua')
 M.fields={SavableActorStates='gi',SavableActorItems='go',NamedSaveData='ni',UnlockedTeleporters='ao',SavePointsVisited='ao',SavePointID='o',LastTouchedCheckpoint='o',SavedArea='o',PlayingMusicTrack='o',SaveLevel='n',CurrentLockInID='n',MaxProgressionLevel='i',DoIntro='b',DoWakeOnBeach='b'}
-function M.personalName(n)return personalNames[n]or n:match('^QDCoopPersonal~')or n:match('^TotalAchievement')or n:match('^ReadNote_')or n:match('GuideGranted$')or n=='ShopAmountSpent'or n=='ShopSessionSpend'or n=='TiniScytheHammerAP'or n=='CompletedChallenges'end
+function M.personalName(n)return personalNames[n]or n:match('^Ghost_.*_RewardCount$')or n:match('^QDCoopPersonal~')or n:match('^TotalAchievement')or n:match('^ReadNote_')or n:match('GuideGranted$')or n=='ShopAmountSpent'or n=='ShopSessionSpend'or n=='TiniScytheHammerAP'or n=='CompletedChallenges'end
 function M.split(s)local r={};for v in(s..'|'):gmatch('(.-)|')do r[#r+1]=v end;return r end
 function M.escape(s)return(s:gsub('[^%w_/%-%.: ]',function(c)return string.format('%%%02X',c:byte())end))end
 function M.unescape(s)if #s>1200 or s:find('%%[^%x]')or s:find('%%.$')then return nil end;return(s:gsub('%%(%x%x)',function(x)return string.char(tonumber(x,16))end))end
@@ -17,11 +18,13 @@ local function value(t,s)
 end
 function M.decode(raw)
  if #raw>M.limit or not raw:match('\nEND\n$')then return nil end
- local out={fields={},streams={{},{}},doors={},levers={},gates={}};local header=false;local count=0
+ local out={fields={},streams={{},{}},doors={},levers={},gates={},arena={}};local header=false;local count=0
  for line in raw:gmatch('[^\n]+')do
   local f=M.split(line);local tag=f[1];count=count+1;if count>20000 then return nil end
   if tag=='QDW1'then if header or #f~=4 or not f[2]:match('^[%w_%-]+$')or #f[2]>80 then return nil end;header=true;out.session=f[2];out.revision=M.integer(f[3],1,1000000000);out.travel=M.integer(f[4],0,1000000000);if not out.revision or not out.travel then return nil end
   elseif tag=='W'then if #f~=2 or out.world or not M.asset(f[2])or f[2]==''then return nil end;out.world=f[2]
+  elseif tag=='MU'then if #f~=2 or out.music~=nil or not M.asset(f[2])then return nil end;out.music=f[2]
+  elseif tag=='TP'then if #f~=2 or out.teleportArrival~=nil or(f[2]~='0'and f[2]~='1')then return nil end;out.teleportArrival=f[2]=='1'
   elseif tag=='R'then if #f~=2 or out.mapRevision then return nil end;out.mapRevision=M.integer(f[2],0,1000000000);if not out.mapRevision then return nil end
   elseif tag=='P'then if #f~=5 or out.pos then return nil end;local a={};for i=2,5 do a[i]=M.number(f[i],-10000000,10000000);if not a[i]then return nil end end;out.pos={X=a[2],Y=a[3],Z=a[4]};out.yaw=a[5]
   elseif tag=='F'then local t=M.fields[f[2]];local s=M.unescape(f[3]or'');if not t or #t~=1 or #f~=3 or s==nil or out.fields[f[2]]~=nil then return nil end;local v=value(t,s);if v==nil then return nil end;out.fields[f[2]]=v
@@ -36,6 +39,7 @@ function M.decode(raw)
   elseif tag=='D'then local k=f[2];local b=M.integer(f[3],0,1);local n=M.integer(f[4],0,10000);if #f~=4 or not M.guid(k)or not b or not n or out.doors[k]then return nil end;out.doors[k]={open=b==1,count=n}
   elseif tag=='J'then local k=f[2];local b=M.integer(f[3],0,1);if #f~=3 or not M.guid(k)or not b or out.levers[k]~=nil then return nil end;out.levers[k]=b==1
   elseif tag=='G'then local v=Gates.decode(f,M);if not v then return nil end;local key=v.path..'|'..v.component;if out.gates[key]then return nil end;out.gates[key]=v
+  elseif tag=='A'then local id,v=Arena.decode(f,M);if not id or out.arena[id]then return nil end;out.arena[id]=v
   elseif tag~='END'then return nil end
  end
  for n in pairs(M.fields)do if out.fields[n]==nil then return nil end end

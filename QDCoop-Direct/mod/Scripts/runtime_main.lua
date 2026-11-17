@@ -1,10 +1,13 @@
--- QD COOP 1.17.3: hash-only lookup, no full-table miss fallback.
+-- QD COOP 1.2.7
 -- Host-owned world overlay with separate guest character persistence.
 local source=debug.getinfo(1,'S').source:gsub('^@','')
 local dir=assert(source:match('^(.*[/\\])'))
 local _ENV=dofile(dir..'fast_lookup.lua')(dir,_G)
 local C=_G.QDCoopNativeConfig or dofile(dir..'config.lua')
 local P=dofile(dir..'protocol.lua')
+C.SkinCatalog=dofile(dir..'skin_catalog.lua')
+C.SkinSelection=dofile(dir..'skin_selection.lua')(C.SkinCatalog,C.Ipc..'/../player-skin.txt')
+C.Skin=C.SkinSelection.selected
 local L=dofile(dir..'localization.lua')()
 local S=dofile(dir..'smoothing.lua')
 local smooth=S.new()
@@ -22,13 +25,22 @@ animation.source=bodySource
 
 local ipc=dofile(dir..'async_ipc.lua')(dir,C.Ipc,C.IpcChannel)
 local read,write=ipc.read,ipc.write
-local frameCost=dofile(dir..'frame_cost.lua')(write)
+local collectPerformance=C.PerformanceDiagnostics~=false
+local frameCost=dofile(dir..'frame_cost.lua')(write,collectPerformance)
 C.Perf=frameCost -- private diagnostics object; never serialized into the protocol
-local lookupCost=dofile(dir..'lookup_profile.lua')(frameCost.clock,write)
+local lookupCost=collectPerformance and dofile(dir..'lookup_profile.lua')(frameCost.clock,write)
 C.ObjectRefs=dofile(dir..'object_refs.lua')(dir,C,valid)
 local function findObject(path)return C.ObjectRefs.find(path)end
-local hookTrace=dofile(dir..'hook_trace.lua')(frameCost.clock,read,write,frameCost);hookTrace.install()
+local hookTrace=collectPerformance and dofile(dir..'hook_trace.lua')(frameCost.clock,read,write,frameCost)
+if hookTrace then hookTrace.install()end
 local guard=dofile(dir..'runtime_guard.lua')(log,write,os.clock)
+local crushRecovery=dofile(dir..'crush_recovery.lua')(valid,log)
+local bossLoadRecovery=dofile(dir..'boss_reward_recovery.lua')(valid,log)
+local campaignLoadRecovery=dofile(dir..'world_campaign_recovery.lua')(valid,full,log,dofile(dir..'world_campaign_triggers.lua')(valid,full))
+local offeringLoadRecovery=dofile(dir..'world_aqua_offerings.lua')(valid,full,log)
+local beaconLoadRecovery=dofile(dir..'world_library_beacons.lua')(valid,full,log)
+local necroLoadRecovery=dofile(dir..'world_necro_walls.lua')(valid,full,log)
+local giantLoadRecovery=dofile(dir..'world_giant_serf.lua')(valid,log,StaticFindObject('/Script/Engine.Default__GameplayStatics'))
 local effects=dofile(dir..'effects.lua')(dir,C,valid,full,read,write,log)
 local audio=dofile(dir..'audio.lua')(dir,C,valid,full,read,write,log,effects.isLocalSource)
 local enemies=dofile(dir..'enemies.lua')(dir,C,valid,full,read,write,log,audio)
@@ -42,6 +54,7 @@ local rescue=dofile(dir..'rescue.lua')(dir,C,P,valid,full,write,log,checkpoint,w
 local items=dofile(dir..'items.lua')(dir,C,P,valid,full,write,log,checkpoint,L)
 checkpoint.setGuard(function()return not items.busy()and not rescue.busy()and not scenes.busy()end)
 local function norm(s)return (s:gsub('\\','/'):gsub('/+$',''):lower())end
+C.SteamJoinAllowed=function()return not items.busy()and not rescue.busy()and not scenes.busy()end
 local menu=C.MenuMode and dofile(dir..'menu.lua')(C,P,read,write,log,worldSync,L) or nil
 local function transform(pos) return {Rotation={X=0,Y=0,Z=0,W=1},Translation=pos,Scale3D={X=1,Y=1,Z=1}}end
 local function dist(a,b)return math.sqrt((a.X-b.X)^2+(a.Y-b.Y)^2+(a.Z-b.Z)^2)end
@@ -57,6 +70,9 @@ local seenEvents={}
 local hookIds={}
 local hooksReady,loadedSlot,verified,disabled=false,false,false,false
 local gs,ks
+local remotes,bodyQuorum
+local roomCodec=C.RoomProtocol==2 and dofile(dir..'room_protocol.lua')or nil
+local lastVisualRoom
 local presentRemote,serviceMotion
 local nextCapture,nextReceive=0,0
 local lastInbound=""
@@ -109,6 +125,40 @@ local function createRemote()
  mesh:SetSkeletalMesh(LoadAsset(bodyAsset),true);mesh:PlayAnimation(LoadAsset(bodyAnim),true)
  log('REMOTE '..full(remote))
 end
+if C.RoomProtocol==2 then
+ C.RoomPeers={}
+ bodyQuorum=dofile(dir..'room_body_transport.lua')(animation.native.catalog,function()
+  if C.NativeSpear==false or not animation.native.ready or animation.native.failed then return false end
+  for _,p in pairs(remotes and remotes.peers or{})do if p.body.native.failed then return false end end
+  return true
+ end,function()return C.NativePoseSource~=false end)
+ remotes=dofile(dir..'remote_players.lua')(dir,C,valid,full,{
+  spawn=function(p)
+   local actor=spawn(findObject('/Script/Engine.SkeletalMeshActor'),{X=p.X,Y=p.Y,Z=p.Z-85});actor:SetActorEnableCollision(false)
+   local mesh=actor:GetComponentByClass(findObject('/Script/Engine.SkeletalMeshComponent'))
+   mesh:SetSkeletalMesh(LoadAsset(bodyAsset),true);mesh:PlayAnimation(LoadAsset(bodyAnim),true);return actor,mesh
+  end,
+  destroy=dispose,position=setPos,error=function(id,err)guard.report('remote:'..id,err)end,
+  remove=function(id)effects.removePeer(id);audio.removePeer(id)end,
+ },animation)
+end
+local function roomFrame(raw,w,now)
+ if not remotes then return P.frame(raw)end
+ remotes.accept(raw,w,now);C.Room=remotes.room;C.RoomPeers=remotes.peers
+ if C.Room.session then
+  bodyQuorum.roster(C.Room)
+  for id,p in pairs(remotes.peers)do if p.frame and p.capabilityFrame~=p.frame then bodyQuorum.receive(id,p.frame,p.at);p.capabilityFrame=p.frame end end
+ end
+ local primary=C.Role=='client'and remotes.peers[C.Room.host]or remotes.peers[C.Room.order[1]]
+ remotePose=primary and primary.pose;peerWorld=primary and primary.world or''
+ if primary then smooth=primary.smooth;remote=primary.actor end
+ return primary and primary.frame
+end
+local function resetRoom()
+ if not remotes then return end
+ remotes.reset();bodyQuorum.reset();C.Room=nil;C.RoomPeers=remotes.peers;lastVisualRoom=nil
+ remote=nil;remotePose=nil;peerWorld='';smooth=S.new()
+end
 local function registerHooks()
  effects.install()
  audio.install()
@@ -126,6 +176,7 @@ local function registerHooks()
   end);hookIds[#hookIds+1]={path,a,b}
  end
  playerHook('ReceiveTick',function()rescue.localFrame(gs:GetRealTimeSeconds(player))end)
+ playerHook('FellInDeathPit',function(_,_,crushing)crushRecovery.begin(player,crushing:get(),gs:GetRealTimeSeconds(player))end)
  playerHook('OnJumped',function()jumpSerial=jumpSerial+1 end)
  playerHook('OnLanded',function()landSerial=landSerial+1 end)
  local placedClass=ks:LoadClassAsset_Blocking(ks:Conv_SoftClassPathToSoftClassRef(ks:MakeSoftClassPath('/Game/QDCoop/QDCoopPlacedItem.QDCoopPlacedItem_C')))
@@ -189,11 +240,19 @@ local journal=dofile(dir..'event_mailbox.lua')(C.Ipc..'/in.events',function(line
   local f=P.split(line);local key=f[1]
   if connected then
    local kind=f[2]
-   if kind=='SC'then return scenes.event(f,remotePose)
-   elseif kind=='VFX'then return effects.event(f,currentWorld,smooth.session)
-   elseif kind=='SND'then return audio.event(f,currentWorld,smooth.session)
-   elseif kind=='BI'or kind=='ER'or kind=='NPC'or kind=='RST'or kind=='THT'then return enemies.event(f,currentWorld,smooth.session,remotePose)
-   elseif kind=='WC'or kind=='WB'or kind=='DC'then return worldSync.event(f,currentWorld,remotePose)
+   local eventPeer,eventPose,eventId=smooth.session,remotePose,nil
+   if remotes then
+    eventId=key:match('^(%x+)%-');local member=eventId and remotes.peers[eventId]
+    if not member then return end
+    if not member.frame then return'retry'end
+    eventPeer=member.frame.T.session;eventPose=member.pose
+    if C.Role=='client'and eventId~=C.Room.host and kind~='RV'and kind~='VFX'and kind~='SND'then return end
+   end
+   if kind=='SC'then return scenes.event(f,eventPose)
+   elseif kind=='VFX'then if remotes then return effects.roomEvent(eventId,f,currentWorld,eventPeer)end;return effects.event(f,currentWorld,eventPeer)
+   elseif kind=='SND'then if remotes then return audio.roomEvent(eventId,f,currentWorld,eventPeer)end;return audio.event(f,currentWorld,eventPeer)
+   elseif kind=='BI'or kind=='ER'or kind=='NPC'or kind=='RST'or kind=='THT'then return enemies.event(f,currentWorld,eventPeer,eventPose)
+   elseif kind=='WC'or kind=='WB'or kind=='DC'then return worldSync.event(f,currentWorld,eventPose)
    elseif kind=='CP'then return checkpoint.event(f)
    elseif kind=='RV'then return rescue.event(f)
    elseif kind=='IT'then return items.event(f)end
@@ -249,6 +308,7 @@ end
 local function captureMotion(w)
  local pos=player:K2_GetActorLocation();local yaw=player:K2_GetActorRotation().Yaw
  local lines={'QDCP1',P.row('P',w,C.Role,pos,yaw,tonumber(player.Health) or 0,attackSerial,player.Dashing and 1 or 0)}
+ lines[#lines+1]='Y|1|'..C.Skin
  if rescue.id()>0 then lines[#lines+1]='G|'..rescue.id()end
  if C.Role=='host'and C.MenuMode then lines[#lines+1]='S|'..tostring(C.SelectedSlot or 0)end
  local movement=player.CharacterMovement;if not valid(movement)then return end
@@ -258,7 +318,10 @@ local function captureMotion(w)
  lines[#lines+1]=string.format('M|%.4f|%.4f|%.4f|%d|%d|%d|%d|%d',velocity.X,velocity.Y,velocity.Z,movement.MovementMode,movement:IsFalling() and 1 or 0,player.Dashing and 1 or 0,jumpSerial,landSerial)
  local actionRow,actionData=action.capture(player);lines[#lines+1]=actionRow
  local bodyState,bodyRows=bodySource.capture(player);actionData.body=bodyState;if bodyRows then lines[#lines+1]=bodyRows end
- local capability,lite=animation.captureMode(C.RunId..'_'..epoch,actionData,rescue.id(),now);lines[#lines+1]=capability
+ local capability,lite
+ if bodyQuorum then capability,lite=bodyQuorum.capture(C.RunId..'_'..epoch,actionData,rescue.id(),now)
+ else capability,lite=animation.captureMode(C.RunId..'_'..epoch,actionData,rescue.id(),now)end
+ lines[#lines+1]=capability
  for _,line in ipairs(animation.capture(player,lite))do lines[#lines+1]=line end
  if C.Role=='host' and targetId~='' and targetPos then
   if C.MenuMode then lines[#lines+1]='S|'..tostring(C.SelectedSlot or 0)end
@@ -271,13 +334,26 @@ captureMotion=frameCost.measure(captureMotion,'body.capture')
 serviceMotion=function()
  if loading or disabled or not valid(player)then return end
  local now=gs:GetRealTimeSeconds(player);local w=world(player);if not w then return end
+ if remotes and connected and now>=nextReceive then
+  nextReceive=now+1/60;roomFrame(read('in.state'),w,now)
+ end
  guard.call('world-background',worldSync.background)
  guard.call('enemy-update',enemies.update,player,w,C.RunId..'_'..epoch,now,connected,smooth.session,remotePose)
  guard.call('fx-update',effects.update,player,w,C.RunId..'_'..epoch,now,connected)
  guard.call('audio-update',audio.update,player,w,C.RunId..'_'..epoch,now,connected)
- if connected and now>=nextReceive then
+ if not remotes and connected and now>=nextReceive then
   nextReceive=nextReceive+1/60;if nextReceive<=now then nextReceive=now+1/60 end;local raw=read('in.state')
   if raw~='' and raw~=lastInbound then local frame=P.frame(raw);if frame then updateReplica(frame,w);lastInbound=raw end end
+ end
+ if remotes and connected then
+  local raw=read('in.visual')
+  if raw~=lastVisualRoom then
+   local room=roomCodec.decode(raw,'QDRV1')
+   if room and C.Room and room.session==C.Room.session then
+    for id,text in pairs(room.frames)do local p=remotes.peers[id];if p and p.frame and p.world==w then effects.roomFrame(id,text,w,p.frame.T.session)end end
+    lastVisualRoom=raw
+   end
+  end
  end
  if connected and now>=nextCapture then
   nextCapture=nextCapture+1/30;if nextCapture<=now then nextCapture=now+1/30 end;guard.call('body-capture',captureMotion,w)
@@ -287,6 +363,16 @@ presentRemote=function()
  if not connected or not valid(player) then return end
  local now=gs:GetRealTimeSeconds(player)
  guard.call('enemy-present',enemies.apply,now)
+ if remotes then
+  remotes.present(now)
+  for _,id in ipairs(remotes.room.order)do local p=remotes.peers[id]
+   if p and p.sample and p.world==world(player)then
+    guard.call('fx-present:'..id,effects.roomApply,id,p.sample.sampleTime,p.body,enemies.sampleTime)
+    guard.call('audio-present:'..id,audio.roomApply,id,p.sample.sampleTime,p.sample)
+   end
+  end
+  return
+ end
  if not valid(remote) then return end
  -- Keep the last accepted sequence on a presentation timeout. Otherwise the
  -- same stale mailbox frame can recreate and destroy a proxy every few ticks.
@@ -322,9 +408,13 @@ local function tick(uiOnly)
  local pawn=valid(gi) and gs:GetPlayerPawn(gi,0) or nil
  local playerClass=findObject('/Game/Player/FS_PlayerChar.FS_PlayerChar_C')
  player=valid(pawn) and valid(playerClass) and pawn:IsA(playerClass) and valid(pawn.CharacterMovement) and pawn or nil
+ if not uiOnly then guard.call('crush-recovery',crushRecovery.poll,gi,player,valid(player)and gs:GetRealTimeSeconds(player)or 0)end
+ if not uiOnly then guard.call('boss-load-recovery',bossLoadRecovery.poll,gi,player,os.clock())end
+ if not uiOnly and C.Role=='menu'then if valid(player) then guard.call('campaign-load-recovery',campaignLoadRecovery.poll,gi,player,gs:GetRealTimeSeconds(player),gs);guard.call('offering-load-recovery',offeringLoadRecovery.poll,gi,player,gs:GetRealTimeSeconds(player),gs)end;guard.call('beacon-load-recovery',beaconLoadRecovery.poll,gi,player,os.clock(),gs);guard.call('necro-load-recovery',necroLoadRecovery.offline,gi,player,os.clock(),gs);guard.call('giant-load-recovery',giantLoadRecovery.poll,gi,player,false)end
  if menu then
   local block=menu.tick(player)
   if menu.ended then
+   resetRoom()
    journal.offset=0
    items.reset(false)
    rescue.reset()
@@ -354,7 +444,7 @@ local function tick(uiOnly)
  -- while the persistent gameplay hooks remain registered.
  effects.install();audio.install()
  local was=connected;connected=peerConnected()
- local frame=P.frame(read('in.state'))
+ local frame=roomFrame(read('in.state'),w,gs:GetRealTimeSeconds(player))
  if worldSync.poll(player,w,connected,frame)then return end
  local session=C.RunId..'_'..epoch
  local now=gs:GetRealTimeSeconds(player)
@@ -363,7 +453,7 @@ local function tick(uiOnly)
  items.poll(gi,player,w,session,connected,frame,stable,now)
  if rescue.poll(gi,player,w,session,connected,frame,stable,now)then return end
  checkpoint.poll(gi,player,w,session,connected,frame,stable and rescue.id()==0,now)
- if was~=connected then log(connected and 'CONNECTED' or 'WAITING');if not connected then dispose(remote);remote=nil;remotePose=nil;smooth:reset();effects.reset();audio.reset();enemies.reset(false);lastRemoteAt=nil end end
+ if was~=connected then log(connected and 'CONNECTED' or 'WAITING');if not connected then resetRoom();dispose(remote);remote=nil;remotePose=nil;smooth:reset();effects.reset();audio.reset();enemies.reset(false);lastRemoteAt=nil end end
  if C.TestTarget and C.Role=='host' and targetId=='' then
   local q=player:K2_GetActorLocation();local rot=player:K2_GetActorRotation();local rad=rot.Yaw*math.pi/180
   createTarget({X=q.X+math.cos(rad)*260,Y=q.Y+math.sin(rad)*260,Z=q.Z-40},C.RunId..'-'..epoch..'-target')
@@ -382,15 +472,22 @@ local function tick(uiOnly)
   local st=smooth.stats
   write('network-smoothing.txt',string.format('sourceHz=%.2f receiveHz=%.2f bufferMs=%.1f jitterMs=%.1f interpolate=%d extrapolate=%d samples=%d captureHz=30 receivePollHz=60\n',1/math.max(smooth.interval,.001),smooth.receiveInterval and 1/math.max(smooth.receiveInterval,.001)or 0,smooth.delay*1000,smooth.jitter*1000,st.interpolate,st.extrapolate,st.samples))
   write('animation-status.txt',animation.status()..'\n')
+  if remotes then
+   local rows={};for _,id in ipairs(remotes.room.order)do local p=remotes.peers[id]
+    rows[#rows+1]=table.concat({id,p.slot,p.body.mode or'-',p.smooth.lastSeq or 0,full(p.actor),full(p.body.pose)},'|')
+   end;write('room-players.txt',table.concat(rows,'\n')..'\n')
+  end
   write('effects-status.txt',effects.status())
   write('audio-status.txt',audio.status());write('ipc-status.txt',ipc.status())
   write('enemy-status.txt',enemies.status())
-  lookupCost.flush();write('object-refs-status.txt',C.ObjectRefs.status())
+  if lookupCost then lookupCost.flush()end
+  write('object-refs-status.txt',C.ObjectRefs.status())
   write('game-status.txt',string.format('role=%s connected=%s world=%s target=%s HP=%.3f remote=%s ticks=%d\n',C.Role,tostring(connected),w,targetId,targetHP,full(remote),ticks))
   write('motion-status.txt',string.format('renderFrames=%d renderHz=%.2f accepted=%d state=%s localJumps=%d localLands=%d bufferDelay=%.3f\n',renderFrames,renderFrom and renderFrames/math.max(now-renderFrom,0.01) or 0,smooth.accepted,remoteMotion,jumpSerial,landSerial,smooth.delay))
  end
 end
 RegisterLoadMapPreHook(function()
+ resetRoom()
  actionDiagnostic=nil
  items.reset(true)
  rescue.reset()
@@ -445,7 +542,7 @@ end)
 local nextControl = 0
 LoopInGameThreadWithDelay(0,function()
  C.ObjectRefs.activate()
- local frameStart=frameCost.clock();frameCost.begin(frameStart);hookTrace.poll(frameStart);ipc.flush();frameCost.add('ipc',(frameCost.clock()-frameStart)*1000)
+ local frameStart=frameCost.clock();frameCost.begin(frameStart);if hookTrace then hookTrace.poll(frameStart)end;ipc.flush();frameCost.add('ipc',(frameCost.clock()-frameStart)*1000)
  if disabled or loading then frameCost.finish(frameCost.clock());return end
  local now = os.clock()
  if now >= nextControl then
@@ -467,7 +564,7 @@ _G.QDCoopEnemies=enemies.inspect
 _G.QDCoopScenes=scenes.inspect
 _G.QDCoopWorld=worldSync.inspect
 _G.QDCoopInspect=function()return {smoothingStats=smooth.stats,player=player,remote=remote,target=target,targetId=targetId,hp=targetHP,version=version,connected=connected,disabled=disabled,epoch=epoch}end
-log('QD COOP 1.17.3 loaded; role='..C.Role..' engineTickQueue='..tostring(EngineTickAvailable))
+log('QD COOP 1.2.7 loaded; role='..C.Role..' engineTickQueue='..tostring(EngineTickAvailable))
 
 
 

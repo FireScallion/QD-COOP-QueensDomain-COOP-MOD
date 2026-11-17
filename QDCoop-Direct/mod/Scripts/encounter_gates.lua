@@ -41,8 +41,11 @@ function M.runtime(valid,full,find,gs,W)
    end
   end
  end
- function R.apply(v)
+ function R.apply(v,animated)
   local a=find(v.path);local cls=find(M.classes[v.kind]);if not valid(a)or not valid(cls)or not a:IsA(cls)then return false end
+  -- The reliable world snapshot is also the late-join baseline. Defer its
+  -- transforms until native motion finishes and reapply the latest sample.
+  if animated and v.component~=''and animated(a)then return false end
   if v.component==''then
    a:SetActorHiddenInGame(v.hidden);a:SetActorEnableCollision(v.collision~=0)
    if v.kind==1 then

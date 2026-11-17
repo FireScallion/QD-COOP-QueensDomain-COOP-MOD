@@ -14,7 +14,7 @@ return function(dir,C,rawValid)
   local records=role=='host'and actors or frozen
   if records[s.name]~=s.record then remove(address);M.misses=M.misses+1;return false end
   local ok,alive=pcall(native,'V',s.token);if not ok then alive=nil end
-  if alive==1 then M.hits=M.hits+1;return true end
+  if alive==1 then M.hits=M.hits+1;return true,s.record end
   remove(address);if alive==0 then M.expired=M.expired+1 else M.fallbacks=M.fallbacks+1 end
   return false
  end
